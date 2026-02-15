@@ -247,7 +247,7 @@ install_all() {
     check_root
     install_deps
     
-    echo -e "\n${Cyan_font_prefix}=== 配置向导 (SS-2022 无代理版) ===${RESET}"
+    echo -e "\n${Cyan_font_prefix}=== 配置向导 (ShadowTLS + SS-2022) ===${RESET}"
     
     # 1. 设置 ShadowTLS 端口
     read -rp "1. 请输入 ShadowTLS 公网端口 (默认 8443): " input_stls_port
