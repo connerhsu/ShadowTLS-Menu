@@ -1,10 +1,9 @@
 #!/bin/bash
 # =========================================
-# 作者: jinqians更改
-# 日期: 2026年2月
+# 作者: jinqians (优化版)
+# 日期: 2025年2月
 # 描述: SS-Rust + ShadowTLS 统一流水线管理脚本
 # 默认端口: 8443 | 默认SNI: player.live-video.net
-# 管理命令: stls
 # =========================================
 
 # 定义颜色代码
@@ -15,7 +14,7 @@ CYAN='\033[0;36m'
 RESET='\033[0m'
 
 # 当前版本号
-current_version="3.2-stls"
+current_version="3.1-pipeline"
 
 # 默认配置
 DEFAULT_PORT=8443
@@ -67,20 +66,14 @@ check_root() {
     fi
 }
 
-# 安装全局命令 (修改为 stls)
+# 安装全局命令
 install_global_command() {
-    # 检查是否已存在名为 stls 的链接或文件，如果不存在或指向错误则重新创建
-    if [ ! -L "/usr/local/bin/stls" ]; then
-        echo -e "${CYAN}正在设置全局命令 'stls'...${RESET}"
-        
-        # 将当前脚本复制为系统脚本文件
-        cp "$0" "/usr/local/bin/stls.sh"
-        chmod +x "/usr/local/bin/stls.sh"
-        
-        # 创建软链接 stls -> stls.sh
-        ln -sf "/usr/local/bin/stls.sh" "/usr/local/bin/stls"
-        
-        echo -e "${GREEN}设置成功！现在您可以在任何位置输入 'stls' 命令来启动管理脚本${RESET}"
+    if [ ! -L "/usr/local/bin/menu" ]; then
+        echo -e "${CYAN}正在设置全局命令 'menu'...${RESET}"
+        cp "$0" "/usr/local/bin/menu.sh"
+        chmod +x "/usr/local/bin/menu.sh"
+        ln -s "/usr/local/bin/menu.sh" "/usr/local/bin/menu"
+        echo -e "${GREEN}设置成功！输入 'menu' 即可打开脚本${RESET}"
     fi
 }
 
@@ -105,7 +98,7 @@ install_pipeline() {
         *) echo -e "${RED}不支持的架构: $ARCH${RESET}"; exit 1 ;;
     esac
 
-    # 3. 设置参数
+    # 3. 设置参数 (允许用户覆盖默认值，但默认直接回车即可)
     echo -e "${YELLOW}默认端口: ${DEFAULT_PORT}${RESET}"
     read -rp "请输入端口 (回车使用默认): " PORT
     PORT=${PORT:-$DEFAULT_PORT}
@@ -120,19 +113,10 @@ install_pipeline() {
 
     echo -e "${CYAN}正在下载 SS-Rust...${RESET}"
     SS_VER=$(get_latest_version "shadowsocks/shadowsocks-rust")
-    # 如果获取失败使用 fallback 版本或者报错，这里假设网络正常
-    if [ -z "$SS_VER" ] || [ "$SS_VER" == "null" ]; then
-        echo -e "${RED}获取 SS-Rust 版本失败，请检查网络${RESET}"
-        exit 1
-    fi
     wget -qO- "https://github.com/shadowsocks/shadowsocks-rust/releases/download/${SS_VER}/shadowsocks-${SS_VER}.${SS_ARCH}.tar.xz" | tar -xJ -C /usr/local/bin/ ssserver
 
     echo -e "${CYAN}正在下载 ShadowTLS...${RESET}"
     ST_VER=$(get_latest_version "ihciah/shadow-tls")
-    if [ -z "$ST_VER" ] || [ "$ST_VER" == "null" ]; then
-        echo -e "${RED}获取 ShadowTLS 版本失败，请检查网络${RESET}"
-        exit 1
-    fi
     wget -qO /usr/local/bin/shadow-tls "https://github.com/ihciah/shadow-tls/releases/download/${ST_VER}/shadow-tls-${ST_ARCH}"
     chmod +x /usr/local/bin/shadow-tls
 
@@ -199,6 +183,9 @@ show_config_info() {
     if [ -z "$pwd" ]; then
         if [ -f "$CONFIG_DIR/ss-config.json" ]; then
             pwd=$(jq -r .password "$CONFIG_DIR/ss-config.json")
+            # 从 systemd 获取端口和域名比较复杂，这里简化处理，如果只是查看信息
+            # 实际上查看信息建议重新解析服务文件，这里假设是安装后立即调用
+            # 或者是单独的 view_config 函数
         else
             echo -e "${RED}未找到配置文件${RESET}"
             return
@@ -219,12 +206,14 @@ show_config_info() {
     echo -e "ShadowTLS 版本: ${YELLOW}v3${RESET}"
     echo -e "${CYAN}--------------------------------------------${RESET}"
     
+    # 简单的 SS 链接生成 (注意：ShadowTLS 客户端配置各异，这里提供通用参数)
     local plugin_opts="host=${dom:-$DEFAULT_DOMAIN}"
+    # URL Encode
     local plugin_opts_enc=$(echo -n "shadow-tls;$plugin_opts" | xxd -plain | tr -d '\n' | sed 's/\(..\)/%\1/g')
     local user_info=$(echo -n "${SS_METHOD}:${pwd}" | base64 -w 0)
     local link="ss://${user_info}@${PUBLIC_IP}:${port:-$DEFAULT_PORT}/?plugin=${plugin_opts_enc}#ShadowTLS-${dom:-$DEFAULT_DOMAIN}"
     
-    echo -e "通用分享链接 (客户端需安装 ShadowTLS 插件):"
+    echo -e "通用分享链接 (可能需要手动调整插件参数):"
     echo -e "${GREEN}${link}${RESET}"
     echo -e "${CYAN}============================================${RESET}"
 }
@@ -237,10 +226,6 @@ view_current_config() {
         local port=$(systemctl cat shadowtls | grep "listen" | sed 's/.*::0:\([0-9]*\).*/\1/')
         local dom=$(systemctl cat shadowtls | grep "\--tls" | awk '{print $NF}')
         
-        # 如果systemctl获取失败（未运行），尝试读取默认值
-        port=${port:-$DEFAULT_PORT}
-        dom=${dom:-$DEFAULT_DOMAIN}
-
         show_config_info "$port" "$pwd" "$dom"
     else
         echo -e "${RED}未检测到安装配置文件${RESET}"
@@ -260,13 +245,9 @@ uninstall_all() {
     rm -f /usr/local/bin/shadow-tls
     rm -rf "$CONFIG_DIR"
     
-    # 同时也移除 stls 命令
-    rm -f /usr/local/bin/stls
-    rm -f /usr/local/bin/stls.sh
-    
     systemctl daemon-reload
     
-    echo -e "${GREEN}卸载完成！全局命令 'stls' 已移除。${RESET}"
+    echo -e "${GREEN}卸载完成！${RESET}"
 }
 
 # 检查服务状态
@@ -288,6 +269,11 @@ check_status() {
     fi
 }
 
+# 更新脚本自身
+update_script() {
+    echo -e "${YELLOW}此脚本为定制版，暂不支持在线自动更新。${RESET}"
+}
+
 # 主菜单
 show_menu() {
     clear
@@ -306,8 +292,6 @@ show_menu() {
     echo -e "${YELLOW}3.${RESET} 卸载所有服务"
     echo -e "${YELLOW}4.${RESET} 退出"
     
-    echo -e "${CYAN}============================================${RESET}"
-    echo -e "${GREEN}提示：退出后输入 'stls' 即可再次打开${RESET}"
     echo -e "${CYAN}============================================${RESET}"
     read -rp "请输入选项 [1-4]: " num
     
