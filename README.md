@@ -1,7 +1,4 @@
-👻 ShadowTLS-Rust-Manager
-<p align="center">
-<img src="https://capsule-render.vercel.app/api?type=waving&color=auto&height=200&section=header&text=ShadowTLS%20Rust%20Manager&fontSize=50" />
-</p>
+👻 ShadowTLS-Rust-Menu
 
 极简 · 稳定 · 强悍 —— 专为 SS-2022 与 ShadowTLS v3 打造的一键直连部署方案。
 
