@@ -277,9 +277,9 @@ uninstall_all() {
 # 菜单
 show_menu() {
     clear
-    echo -e "${CYAN}SS-Rust + ShadowTLS 管理脚本 v3.3${RESET}"
-    echo -e "${GREEN}1.${RESET} 安装/重置 (自定义加密/端口)"
-    echo -e "${GREEN}2.${RESET} 查看配置 (含 Mihomo 格式)"
+    echo -e "${CYAN}SS-Rust + ShadowTLS 管理脚本 v2${RESET}"
+    echo -e "${GREEN}1.${RESET} 一键安装SS-Rust + ShadowTLS / 重置 (自定义加密/端口)"
+    echo -e "${GREEN}2.${RESET} 查看当前配置"
     echo -e "${GREEN}3.${RESET} 卸载"
     echo -e "${GREEN}0.${RESET} 退出"
     
