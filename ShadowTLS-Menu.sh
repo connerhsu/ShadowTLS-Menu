@@ -1,8 +1,8 @@
 #!/bin/bash
 # ====================================================
-# 作者: Connor (v4.1 Custom-2022)
-# 描述: SS-Rust (自定义端口/SS2022) + ShadowTLS 管理脚本
-# 特性: 专为 SS-2022 优化、支持自定义内部端口
+# 作者: Connor (v4.3 No-Proxy)
+# 描述: SS-Rust (自定义/SS2022) + ShadowTLS
+# 更新: 移除代理下载，强制，修复文件损坏问题
 # ====================================================
 
 # --- 全局变量与路径 ---
@@ -12,13 +12,22 @@ CONFIG_DIR="/etc/ss-stls"
 CONFIG_FILE="${CONFIG_DIR}/config.env"
 SS_RUST_BIN="/usr/local/bin/ssserver"
 STLS_BIN="/usr/local/bin/shadow-tls"
-GH_PROXY="https://mirror.ghproxy.com/"
 
 # --- 颜色定义 ---
 Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Green_background_prefix="\033[42;37m" && Red_background_prefix="\033[41;37m" && RESET="\033[0m" && Yellow_font_prefix="\033[0;33m" && Cyan_font_prefix="\033[0;36m"
 INFO="${Green_font_prefix}[信息]${RESET}"
 ERROR="${Red_font_prefix}[错误]${RESET}"
 WARN="${Yellow_font_prefix}[警告]${RESET}"
+
+# --- 0. 自动接管 menu 命令 ---
+install_global() {
+    if [[ "$0" != "/usr/local/bin/menu.sh" ]]; then
+        cp "$0" /usr/local/bin/menu.sh
+        chmod +x /usr/local/bin/menu.sh
+        ln -sf /usr/local/bin/menu.sh /usr/local/bin/menu
+        echo -e "${INFO} 已更新全局命令: 输入 ${Green_font_prefix}menu${RESET} 即可唤出此版本"
+    fi
+}
 
 # --- 1. 基础检查与工具函数 ---
 
@@ -118,14 +127,23 @@ download_file() {
     local url=$1
     local out=$2
     local name=$3
-    echo -e "${INFO} 正在下载 $name..."
-    wget --show-progress -qO "$out" "${GH_PROXY}${url}"
-    if [[ $? -ne 0 || ! -s "$out" ]]; then
-        echo -e "${WARN} 代理下载失败，尝试直连..."
-        wget --show-progress -qO "$out" "${url}"
+    
+    # 强制删除旧文件，防止wget重命名或追加
+    rm -f "$out"
+    
+    echo -e "${INFO} 正在下载 $name ..."
+    echo -e "${INFO} 下载地址: $url"
+    
+    wget --show-progress -qO "$out" "${url}"
+    
+    if [[ $? -ne 0 ]]; then
+        echo -e "${ERROR} $name 下载失败！请检查网络连接。"
+        return 1
     fi
+
     if [[ ! -s "$out" ]]; then
-        echo -e "${ERROR} $name 下载失败！" && return 1
+        echo -e "${ERROR} $name 下载文件为空！" 
+        return 1
     fi
     return 0
 }
@@ -152,7 +170,10 @@ install_ss_rust() {
     local ver=$(get_latest_ver "shadowsocks/shadowsocks-rust")
     [[ -z "$ver" ]] && ver="v1.18.2"
     local url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${ver}/shadowsocks-${ver}.${SS_ARCH}.tar.xz"
+    
     download_file "$url" "/tmp/ss.tar.xz" "SS-Rust" || return 1
+    
+    echo -e "${INFO} 解压 SS-Rust..."
     tar -xJf /tmp/ss.tar.xz -C /usr/local/bin/ ssserver
     chmod +x "$SS_RUST_BIN"
     rm -f /tmp/ss.tar.xz
@@ -190,13 +211,18 @@ install_stls() {
     local ver=$(get_latest_ver "ihciah/shadow-tls")
     [[ -z "$ver" ]] && ver="v3.3.5"
     local url="https://github.com/ihciah/shadow-tls/releases/download/${ver}/shadow-tls-${ST_ARCH}"
+    
     download_file "$url" "$STLS_BIN" "ShadowTLS" || return 1
     chmod +x "$STLS_BIN"
     
+    # 关键：文件完整性校验
+    echo -e "${INFO} 校验 ShadowTLS 二进制文件..."
     if ! "$STLS_BIN" --version >/dev/null 2>&1; then
-        echo -e "${ERROR} ShadowTLS 二进制文件校验失败 (Exec format error)"
+        echo -e "${ERROR} 校验失败 (Exec format error)。"
+        echo -e "${WARN} 原因：文件下载不完整 或 系统架构($ST_ARCH)不匹配。"
         return 1
     fi
+    echo -e "${INFO} 校验通过。"
 
     cat > /etc/systemd/system/shadowtls.service <<EOF
 [Unit]
@@ -221,7 +247,7 @@ install_all() {
     check_root
     install_deps
     
-    echo -e "\n${Cyan_font_prefix}=== 配置向导 (SS-2022 定制版) ===${RESET}"
+    echo -e "\n${Cyan_font_prefix}=== 配置向导 (SS-2022 无代理版) ===${RESET}"
     
     # 1. 设置 ShadowTLS 端口
     read -rp "1. 请输入 ShadowTLS 公网端口 (默认 8443): " input_stls_port
@@ -231,7 +257,7 @@ install_all() {
         systemctl stop shadowtls ss-rust 2>/dev/null
     fi
     
-    # 2. 设置 SS-Rust 端口 (新增自定义)
+    # 2. 设置 SS-Rust 端口
     while true; do
         read -rp "2. 请输入 SS-Rust 内部监听端口 (默认随机): " input_ss_port
         if [[ -z "$input_ss_port" ]]; then
@@ -254,32 +280,20 @@ install_all() {
     read -rp "3. 请输入伪装域名 (默认 player.live-video.net): " input_dom
     DOMAIN=${input_dom:-player.live-video.net}
     
-    # 4. 加密方式 (SS-2022 专用)
+    # 4. 加密方式
     echo -e "4. 请选择 SS-2022 加密方式:"
     echo -e "  1. 2022-blake3-aes-256-gcm (推荐)"
     echo -e "  2. 2022-blake3-aes-128-gcm"
     echo -e "  3. 2022-blake3-chacha20-poly1305"
     read -rp "   请选择 [1-3]: " m_idx
     case $m_idx in
-        2) 
-            METHOD="2022-blake3-aes-128-gcm"
-            # 128-gcm 需要 16 字节密钥
-            KEY_LEN=16 
-            ;;
-        3) 
-            METHOD="2022-blake3-chacha20-poly1305"
-            # chacha20 需要 32 字节密钥
-            KEY_LEN=32 
-            ;;
-        *) 
-            METHOD="2022-blake3-aes-256-gcm"
-            # 256-gcm 需要 32 字节密钥
-            KEY_LEN=32 
-            ;;
+        2) METHOD="2022-blake3-aes-128-gcm"; KEY_LEN=16 ;;
+        3) METHOD="2022-blake3-chacha20-poly1305"; KEY_LEN=32 ;;
+        *) METHOD="2022-blake3-aes-256-gcm"; KEY_LEN=32 ;;
     esac
     
-    # 5. 密码生成 (强制合规)
-    echo -e "${INFO} 正在生成符合协议要求的 ${KEY_LEN} 字节密钥..."
+    # 5. 密码生成
+    echo -e "${INFO} 正在生成 ${KEY_LEN} 字节密钥..."
     PASSWORD=$(openssl rand -base64 $KEY_LEN)
 
     # 执行安装
@@ -294,13 +308,12 @@ install_all() {
     systemctl restart ss-rust shadowtls
     
     echo -e "${INFO} 安装完成，检查状态..."
-    sleep 2
+    sleep 3
     if systemctl is-active --quiet shadowtls; then
         show_config
     else
         echo -e "${ERROR} 启动失败！"
         echo -e "请检查日志: journalctl -u shadowtls -n 20"
-        echo -e "可能原因: 端口占用、域名解析失败、或系统不支持"
     fi
 }
 
@@ -357,6 +370,7 @@ uninstall() {
     rm -f /etc/systemd/system/ss-rust.service /etc/systemd/system/shadowtls.service
     rm -f "$SS_RUST_BIN" "$STLS_BIN"
     rm -rf "$CONFIG_DIR"
+    rm -f /usr/local/bin/menu.sh /usr/local/bin/menu
     systemctl daemon-reload
     echo -e "${INFO} 卸载完成"
 }
@@ -366,7 +380,7 @@ uninstall() {
 main_menu() {
     while true; do
         clear
-        echo -e "${Cyan_font_prefix}SS-2022 + ShadowTLS 管理脚本 v4.1${RESET}"
+        echo -e "${Cyan_font_prefix}SS-2022 + ShadowTLS 管理脚本 v4.3${RESET}"
         echo -e "=================================="
         if [[ -f "$CONFIG_FILE" ]]; then
             source "$CONFIG_FILE"
@@ -379,7 +393,7 @@ main_menu() {
             echo -e " 状态: ${Red_font_prefix}未安装${RESET}"
         fi
         echo -e "=================================="
-        echo -e "${Green_font_prefix}1.${RESET} 安装 / 重置 (自定义端口)"
+        echo -e "${Green_font_prefix}1.${RESET} 一键安装 / 重置"
         echo -e "${Green_font_prefix}2.${RESET} 查看连接信息"
         echo -e "${Green_font_prefix}3.${RESET} 重启服务"
         echo -e "${Green_font_prefix}4.${RESET} 停止服务"
@@ -399,5 +413,7 @@ main_menu() {
     done
 }
 
+# --- 启动逻辑 ---
 check_root
+install_global
 main_menu
