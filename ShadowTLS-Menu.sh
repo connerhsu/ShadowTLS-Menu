@@ -1,7 +1,8 @@
 #!/bin/bash
 # =========================================
-# 作者: jinqians (v3.6 Dashboard)
-# 描述: SS-Rust + ShadowTLS 管理脚本 (带状态面板)
+# 作者: jinqians (v3.7 Fix-2022)
+# 描述: 修复 SS-2022 密钥长度导致的启动失败问题
+# 默认: 2022-blake3-aes-256-gcm
 # =========================================
 
 # --- 颜色定义 ---
@@ -20,6 +21,8 @@ CONFIG_DIR="/etc/ss-stls"
 # --- 依赖检查 ---
 check_dependencies() {
     local deps=("jq" "curl" "wget" "openssl" "tar" "net-tools")
+    local need_install=false
+    
     if [ -x "$(command -v apt)" ]; then
         CMD_INSTALL="apt install -y"
         CMD_UPDATE="apt update"
@@ -30,7 +33,6 @@ check_dependencies() {
         return
     fi
 
-    local need_install=false
     for dep in "${deps[@]}"; do
         if ! command -v "$dep" &> /dev/null; then
             need_install=true
@@ -75,10 +77,10 @@ open_firewall() {
 # --- 状态检测面板 ---
 show_dashboard() {
     echo -e "${CYAN}============================================${RESET}"
-    echo -e "${WHITE}           ShadowTLS 状态面板 v3.6          ${RESET}"
+    echo -e "${WHITE}           ShadowTLS 状态面板 v3.7          ${RESET}"
     echo -e "${CYAN}============================================${RESET}"
 
-    if [ ! -f "$CONFIG_DIR/ss-config.json" ] || [ ! -f "/etc/systemd/system/shadowtls.service" ]; then
+    if [ ! -f "$CONFIG_DIR/ss-config.json" ]; then
         echo -e "${YELLOW}   状态: 未安装 或 配置文件丢失${RESET}"
         echo -e "${CYAN}============================================${RESET}"
         return
@@ -98,15 +100,11 @@ show_dashboard() {
     fi
 
     # 获取配置信息
-    # SS Info
     local ss_port=$(jq -r .server_port "$CONFIG_DIR/ss-config.json" 2>/dev/null)
     local method=$(jq -r .method "$CONFIG_DIR/ss-config.json" 2>/dev/null)
-    
-    # STLS Info (解析 systemd service 文件)
-    local stls_port=$(grep "listen 0.0.0.0:" /etc/systemd/system/shadowtls.service | sed 's/.*0.0.0.0:\([0-9]*\).*/\1/')
-    local domain=$(grep "\--tls" /etc/systemd/system/shadowtls.service | awk '{print $NF}')
+    local stls_port=$(grep "listen 0.0.0.0:" /etc/systemd/system/shadowtls.service 2>/dev/null | sed 's/.*0.0.0.0:\([0-9]*\).*/\1/')
+    local domain=$(grep "\--tls" /etc/systemd/system/shadowtls.service 2>/dev/null | awk '{print $NF}')
 
-    # 显示表格
     echo -e "组件名称   | 运行状态   | 监听端口"
     echo -e "-----------|------------|----------------"
     echo -e "ShadowTLS  | $STLS_STATUS   | ${GREEN}${stls_port:-未知}${RESET} (公网)"
@@ -115,6 +113,16 @@ show_dashboard() {
     echo -e "加密算法: ${CYAN}${method:-未知}${RESET}"
     echo -e "伪装域名: ${CYAN}${domain:-未知}${RESET}"
     echo -e "${CYAN}============================================${RESET}"
+}
+
+# --- 查看错误日志 ---
+check_logs() {
+    echo -e "${CYAN}>>> 正在获取 SS-Rust 最后 20 行日志...${RESET}"
+    journalctl -u ss-rust -n 20 --no-pager
+    echo -e "\n${CYAN}>>> 正在获取 ShadowTLS 最后 20 行日志...${RESET}"
+    journalctl -u shadowtls -n 20 --no-pager
+    echo -e "\n按任意键返回..."
+    read -n 1 -s -r
 }
 
 # --- 安装逻辑 ---
@@ -130,7 +138,7 @@ install_logic() {
     esac
 
     clear
-    echo -e "${CYAN}>>> 配置向导${RESET}"
+    echo -e "${CYAN}>>> 配置向导 (v3.7 修复版)${RESET}"
 
     # 1. 端口配置
     read -rp "1. 请输入公网连接端口 (默认 $DEFAULT_STLS_PORT): " STLS_PORT
@@ -145,22 +153,30 @@ install_logic() {
     DOMAIN=${DOMAIN:-$DEFAULT_DOMAIN}
 
     echo -e "4. 请选择加密方式:"
-    echo "   1) aes-256-gcm (默认)"
-    echo "   2) chacha20-ietf-poly1305"
-    echo "   3) 2022-blake3-aes-256-gcm"
+    echo "   1) 2022-blake3-aes-256-gcm (默认/推荐)"
+    echo "   2) aes-256-gcm (传统)"
+    echo "   3) chacha20-ietf-poly1305"
     read -rp "   选择 [1-3]: " m_opt
     case $m_opt in
-        2) SS_METHOD="chacha20-ietf-poly1305" ;;
-        3) SS_METHOD="2022-blake3-aes-256-gcm" ;;
-        *) SS_METHOD="aes-256-gcm" ;;
+        2) SS_METHOD="aes-256-gcm" ;;
+        3) SS_METHOD="chacha20-ietf-poly1305" ;;
+        *) SS_METHOD="2022-blake3-aes-256-gcm" ;;
     esac
+    echo -e "   -> 已选择加密: ${GREEN}$SS_METHOD${RESET}"
 
-    # 3. 密码
-    read -rp "5. 请输入密码 (回车随机): " PASSWORD
-    [ -z "$PASSWORD" ] && PASSWORD=$(openssl rand -base64 16)
+    # 3. 密码生成 (关键修复)
+    if [[ "$SS_METHOD" == *"2022"* ]]; then
+        echo -e "${YELLOW}5. 检测到 SS-2022 协议，强制自动生成 32字节 Base64 密钥...${RESET}"
+        # 生成 32 字节的随机数并 base64 编码，符合 ss-2022 要求
+        PASSWORD=$(openssl rand -base64 32)
+        echo -e "   -> 密钥已生成"
+    else
+        read -rp "5. 请输入密码 (回车随机): " PASSWORD
+        [ -z "$PASSWORD" ] && PASSWORD=$(openssl rand -base64 16)
+    fi
 
     # 下载与安装
-    echo -e "\n${CYAN}>>> 正在安装...${RESET}"
+    echo -e "\n${CYAN}>>> 正在下载组件...${RESET}"
     
     SS_VER=$(get_version "shadowsocks/shadowsocks-rust")
     wget -qO- "https://github.com/shadowsocks/shadowsocks-rust/releases/download/${SS_VER}/shadowsocks-${SS_VER}.${SS_ARCH}.tar.xz" | tar -xJ -C /usr/local/bin/ ssserver
@@ -170,7 +186,6 @@ install_logic() {
     chmod +x /usr/local/bin/shadow-tls
 
     # 写入配置
-    # SS-Rust Config
     cat > "$CONFIG_DIR/ss-config.json" <<EOF
 {
     "server": "127.0.0.1",
@@ -212,9 +227,17 @@ EOF
     systemctl enable ss-rust shadowtls >/dev/null 2>&1
     systemctl restart ss-rust shadowtls
 
-    echo -e "${GREEN}>>> 安装完成！${RESET}"
-    sleep 1
-    show_info_page
+    echo -e "${GREEN}>>> 安装配置完成！正在检查服务状态...${RESET}"
+    sleep 3
+    
+    # 自动检查
+    if systemctl is-active --quiet ss-rust; then
+        show_info_page
+    else
+        echo -e "${RED}>>> 警告：SS-Rust 启动失败！${RESET}"
+        echo -e "请使用菜单中的 [4. 查看错误日志] 进行排查"
+        read -n 1 -s -r -p "按任意键返回菜单..."
+    fi
 }
 
 show_info_page() {
@@ -287,9 +310,10 @@ while true; do
     clear
     show_dashboard
     
-    echo -e "${GREEN}1.${RESET} 安装/重置服务 (自定义端口)"
+    echo -e "${GREEN}1.${RESET} 安装/重置服务 (Fix SS-2022)"
     echo -e "${GREEN}2.${RESET} 查看连接信息 (链接/Clash)"
     echo -e "${GREEN}3.${RESET} 卸载服务"
+    echo -e "${YELLOW}4.${RESET} 查看错误日志 (Debug)"
     echo -e "${GREEN}0.${RESET} 退出脚本"
     echo ""
     read -rp "请输入选项: " choice
@@ -298,6 +322,7 @@ while true; do
         1) install_logic ;;
         2) show_info_page ;;
         3) uninstall ;;
+        4) check_logs ;;
         0) exit 0 ;;
         *) ;;
     esac
