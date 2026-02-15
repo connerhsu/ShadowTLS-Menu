@@ -1,194 +1,169 @@
 #!/bin/bash
-# =========================================
-# 作者: jinqians (v3.8 Stable)
-# 描述: 修复下载失败问题，增加端口检测，锁定稳定版本
-# =========================================
+# ====================================================
+# 作者: Connor (v4.1 Custom-2022)
+# 描述: SS-Rust (自定义端口/SS2022) + ShadowTLS 管理脚本
+# 特性: 专为 SS-2022 优化、支持自定义内部端口
+# ====================================================
+
+# --- 全局变量与路径 ---
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
+export PATH
+CONFIG_DIR="/etc/ss-stls"
+CONFIG_FILE="${CONFIG_DIR}/config.env"
+SS_RUST_BIN="/usr/local/bin/ssserver"
+STLS_BIN="/usr/local/bin/shadow-tls"
+GH_PROXY="https://mirror.ghproxy.com/"
 
 # --- 颜色定义 ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-RESET='\033[0m'
-WHITE='\033[1;37m'
+Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Green_background_prefix="\033[42;37m" && Red_background_prefix="\033[41;37m" && RESET="\033[0m" && Yellow_font_prefix="\033[0;33m" && Cyan_font_prefix="\033[0;36m"
+INFO="${Green_font_prefix}[信息]${RESET}"
+ERROR="${Red_font_prefix}[错误]${RESET}"
+WARN="${Yellow_font_prefix}[警告]${RESET}"
 
-# --- 锁定稳定版本 (防止API失败) ---
-FIXED_SS_VER="v1.18.2"    # 稳定版 SS-Rust
-FIXED_ST_VER="v3.3.5"     # 稳定版 ShadowTLS
-CONFIG_DIR="/etc/ss-stls"
+# --- 1. 基础检查与工具函数 ---
 
-# --- 依赖检查 ---
-check_dependencies() {
-    local deps=("jq" "curl" "wget" "openssl" "tar" "net-tools" "lsof")
-    if [ -x "$(command -v apt)" ]; then
-        CMD_INSTALL="apt install -y"
-        CMD_UPDATE="apt update"
-    elif [ -x "$(command -v yum)" ]; then
-        CMD_INSTALL="yum install -y"
-        CMD_UPDATE="yum makecache"
+check_root() {
+    [[ $EUID -ne 0 ]] && echo -e "${ERROR} 请使用 sudo 或 root 运行此脚本" && exit 1
+}
+
+check_sys() {
+    if [[ -f /etc/redhat-release ]]; then
+        RELEASE="centos"
+    elif grep -q -E -i "debian|ubuntu" /etc/issue; then
+        RELEASE="debian"
+    elif grep -q -E -i "centos|red hat|redhat" /etc/issue; then
+        RELEASE="centos"
+    elif grep -q -E -i "debian|ubuntu" /proc/version; then
+        RELEASE="debian"
     else
-        return
+        RELEASE="unknown"
     fi
+}
 
+install_deps() {
+    echo -e "${INFO} 正在检查依赖..."
+    local deps=("wget" "curl" "openssl" "jq" "tar" "lsof")
+    local missing=()
     for dep in "${deps[@]}"; do
-        if ! command -v "$dep" &> /dev/null; then
-            echo -e "${CYAN}> 正在安装依赖: $dep ...${RESET}"
-            $CMD_INSTALL "$dep" >/dev/null 2>&1
-        fi
+        if ! command -v "$dep" >/dev/null 2>&1; then missing+=("$dep"); fi
     done
-}
 
-# --- 辅助工具 ---
-url_encode() {
-    echo -n "$1" | od -A n -t x1 | tr -d ' \n' | sed 's/../%&/g'
-}
-
-open_firewall() {
-    local port=$1
-    if command -v iptables &> /dev/null; then
-        iptables -I INPUT -p tcp --dport "$port" -j ACCEPT
-        iptables -I INPUT -p udp --dport "$port" -j ACCEPT
-    fi
-    if command -v ufw &> /dev/null && ufw status | grep -q "Active"; then
-        ufw allow "$port"/tcp >/dev/null 2>&1
-        ufw allow "$port"/udp >/dev/null 2>&1
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo -e "${INFO} 安装缺失依赖: ${missing[*]}"
+        check_sys
+        if [[ "$RELEASE" == "debian" ]]; then
+            apt-get update && apt-get install -y "${missing[@]}"
+        elif [[ "$RELEASE" == "centos" ]]; then
+            if command -v dnf >/dev/null; then dnf install -y "${missing[@]}"; else yum install -y "${missing[@]}"; fi
+        else
+            echo -e "${ERROR} 无法自动安装依赖，请手动安装: ${missing[*]}" && exit 1
+        fi
     fi
 }
 
-check_port_usage() {
+get_arch() {
+    case "$(uname -m)" in
+        x86_64) 
+            SS_ARCH="x86_64-unknown-linux-gnu"
+            ST_ARCH="x86_64-unknown-linux-musl" 
+            ;;
+        aarch64) 
+            SS_ARCH="aarch64-unknown-linux-gnu"
+            ST_ARCH="aarch64-unknown-linux-musl" 
+            ;;
+        *) echo -e "${ERROR} 不支持的架构: $(uname -m)" && exit 1 ;;
+    esac
+}
+
+get_public_ip() {
+    local ipv4=""
+    local apis=("http://ipinfo.io/ip" "http://api.ip.sb/ip" "http://members.3322.org/dyndns/getip")
+    for api in "${apis[@]}"; do
+        ipv4=$(curl -s4 -m 5 "$api" | tr -d '\n')
+        [[ -n "$ipv4" ]] && break
+    done
+    if [[ -z "$ipv4" ]]; then
+        ipv4=$(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+' | head -n 1)
+    fi
+    echo "$ipv4"
+}
+
+check_port() {
+    if lsof -i:"$1" >/dev/null 2>&1; then return 0; else return 1; fi
+}
+
+allow_port() {
     local port=$1
-    if lsof -i:"$port" >/dev/null 2>&1; then
-        echo -e "${RED}>>> 警告：端口 $port 已经被占用！${RESET}"
-        lsof -i:"$port"
-        echo -e "${YELLOW}请在安装时更换一个端口，或者停止占用该端口的程序。${RESET}"
-        return 1
+    if command -v ufw >/dev/null; then ufw allow "$port" >/dev/null 2>&1; fi
+    if command -v firewall-cmd >/dev/null; then 
+        firewall-cmd --zone=public --add-port="$port"/tcp --permanent >/dev/null 2>&1
+        firewall-cmd --zone=public --add-port="$port"/udp --permanent >/dev/null 2>&1
+        firewall-cmd --reload >/dev/null 2>&1
+    fi
+    if command -v iptables >/dev/null; then
+        iptables -I INPUT -p tcp --dport "$port" -j ACCEPT >/dev/null 2>&1
+        iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
+    fi
+}
+
+# --- 2. 核心功能函数 ---
+
+get_latest_ver() {
+    local repo=$1
+    local ver=$(curl -s "https://api.github.com/repos/$repo/releases/latest" | jq -r .tag_name)
+    [[ -z "$ver" || "$ver" == "null" ]] && echo "" || echo "$ver"
+}
+
+download_file() {
+    local url=$1
+    local out=$2
+    local name=$3
+    echo -e "${INFO} 正在下载 $name..."
+    wget --show-progress -qO "$out" "${GH_PROXY}${url}"
+    if [[ $? -ne 0 || ! -s "$out" ]]; then
+        echo -e "${WARN} 代理下载失败，尝试直连..."
+        wget --show-progress -qO "$out" "${url}"
+    fi
+    if [[ ! -s "$out" ]]; then
+        echo -e "${ERROR} $name 下载失败！" && return 1
     fi
     return 0
 }
 
-# --- 状态检测面板 ---
-show_dashboard() {
-    echo -e "${CYAN}============================================${RESET}"
-    echo -e "${WHITE}        ShadowTLS 修复版 v3.8 (Stable)      ${RESET}"
-    echo -e "${CYAN}============================================${RESET}"
-
-    if [ ! -f "$CONFIG_DIR/ss-config.json" ]; then
-        echo -e "${YELLOW}   状态: 未安装${RESET}"
-        echo -e "${CYAN}============================================${RESET}"
-        return
-    fi
-
-    # 状态检测
-    if systemctl is-active --quiet ss-rust; then
-        SS_STATUS="${GREEN}● 运行中${RESET}"
-    else
-        SS_STATUS="${RED}● 已停止${RESET}"
-    fi
-
-    if systemctl is-active --quiet shadowtls; then
-        STLS_STATUS="${GREEN}● 运行中${RESET}"
-    else
-        STLS_STATUS="${RED}● 已停止${RESET}"
-    fi
-
-    local stls_port=$(grep "listen 0.0.0.0:" /etc/systemd/system/shadowtls.service 2>/dev/null | sed 's/.*0.0.0.0:\([0-9]*\).*/\1/')
-    local ss_port=$(jq -r .server_port "$CONFIG_DIR/ss-config.json" 2>/dev/null)
-    local method=$(jq -r .method "$CONFIG_DIR/ss-config.json" 2>/dev/null)
-
-    echo -e "组件       | 状态       | 端口"
-    echo -e "-----------|------------|----------------"
-    echo -e "ShadowTLS  | $STLS_STATUS   | ${GREEN}${stls_port:-N/A}${RESET}"
-    echo -e "SS-Rust    | $SS_STATUS   | ${YELLOW}${ss_port:-N/A}${RESET}"
-    echo -e ""
-    echo -e "加密: ${CYAN}${method:-N/A}${RESET}"
-    echo -e "${CYAN}============================================${RESET}"
-}
-
-# --- 查看错误日志 ---
-check_logs() {
-    echo -e "\n${RED}>>> ShadowTLS 错误日志 (最后20行):${RESET}"
-    journalctl -u shadowtls -n 20 --no-pager
-    echo -e "\n${RED}>>> SS-Rust 错误日志 (最后10行):${RESET}"
-    journalctl -u ss-rust -n 10 --no-pager
-    echo -e "\n按任意键返回..."
-    read -n 1 -s -r
-}
-
-# --- 安装逻辑 ---
-install_logic() {
-    check_dependencies
+write_config() {
     mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_FILE" <<EOF
+STLS_PORT=$STLS_PORT
+SS_PORT=$SS_PORT
+PASSWORD=$PASSWORD
+METHOD=$METHOD
+DOMAIN=$DOMAIN
+EOF
+}
+
+read_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; return 0; else return 1; fi
+}
+
+# --- 3. 安装逻辑 ---
+
+install_ss_rust() {
+    get_arch
+    local ver=$(get_latest_ver "shadowsocks/shadowsocks-rust")
+    [[ -z "$ver" ]] && ver="v1.18.2"
+    local url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${ver}/shadowsocks-${ver}.${SS_ARCH}.tar.xz"
+    download_file "$url" "/tmp/ss.tar.xz" "SS-Rust" || return 1
+    tar -xJf /tmp/ss.tar.xz -C /usr/local/bin/ ssserver
+    chmod +x "$SS_RUST_BIN"
+    rm -f /tmp/ss.tar.xz
     
-    ARCH=$(uname -m)
-    case $ARCH in
-        x86_64)  SS_ARCH="x86_64-unknown-linux-gnu"; ST_ARCH="x86_64-unknown-linux-musl" ;;
-        aarch64) SS_ARCH="aarch64-unknown-linux-gnu"; ST_ARCH="aarch64-unknown-linux-musl" ;;
-        *) echo -e "${RED}不支持架构: $ARCH${RESET}"; exit 1 ;;
-    esac
-
-    clear
-    echo -e "${CYAN}>>> 1. 端口设置${RESET}"
-    read -rp "请输入公网端口 (例如 8443): " STLS_PORT
-    STLS_PORT=${STLS_PORT:-8443}
-    
-    # 检查端口占用
-    check_port_usage "$STLS_PORT"
-    if [ $? -ne 0 ]; then
-        read -rp "是否强制继续? (y/N): " force_opt
-        if [[ "$force_opt" != "y" ]]; then return; fi
-        # 尝试停止旧服务释放端口
-        systemctl stop shadowtls 2>/dev/null
-    fi
-
-    SS_PORT=$(shuf -i 20000-60000 -n 1)
-
-    echo -e "\n${CYAN}>>> 2. 伪装设置${RESET}"
-    read -rp "请输入伪装域名 (默认 player.live-video.net): " DOMAIN
-    DOMAIN=${DOMAIN:-player.live-video.net}
-
-    echo -e "\n${CYAN}>>> 3. 加密设置${RESET}"
-    echo "1) 2022-blake3-aes-256-gcm (默认/推荐)"
-    echo "2) aes-256-gcm"
-    echo "3) chacha20-ietf-poly1305"
-    read -rp "选择: " m_opt
-    case $m_opt in
-        2) SS_METHOD="aes-256-gcm"; PASS_CMD="openssl rand -base64 16" ;;
-        3) SS_METHOD="chacha20-ietf-poly1305"; PASS_CMD="openssl rand -base64 16" ;;
-        *) SS_METHOD="2022-blake3-aes-256-gcm"; PASS_CMD="openssl rand -base64 32" ;;
-    esac
-    
-    # 自动生成密码
-    PASSWORD=$($PASS_CMD)
-
-    # --- 下载核心 (带校验) ---
-    echo -e "\n${CYAN}>>> 4. 正在下载组件...${RESET}"
-    
-    # 下载 SS-Rust
-    wget -qO- "https://github.com/shadowsocks/shadowsocks-rust/releases/download/${FIXED_SS_VER}/shadowsocks-${FIXED_SS_VER}.${SS_ARCH}.tar.xz" | tar -xJ -C /usr/local/bin/ ssserver
-    if [ ! -f "/usr/local/bin/ssserver" ]; then
-        echo -e "${RED}SS-Rust 下载失败！${RESET}"; return
-    fi
-
-    # 下载 ShadowTLS
-    echo -e "   正在下载 ShadowTLS (${FIXED_ST_VER})..."
-    wget -qO /usr/local/bin/shadow-tls "https://github.com/ihciah/shadow-tls/releases/download/${FIXED_ST_VER}/shadow-tls-${ST_ARCH}"
-    chmod +x /usr/local/bin/shadow-tls
-    
-    # 校验 ShadowTLS 是否可运行
-    if ! /usr/local/bin/shadow-tls --version >/dev/null 2>&1; then
-        echo -e "${RED}ShadowTLS 二进制文件无效，尝试备用源...${RESET}"
-        # 这里可以加备用下载逻辑，或者提示检查网络
-        echo -e "${RED}下载失败，请检查服务器网络连接 GitHub 是否正常。${RESET}"
-        return
-    fi
-
-    # --- 写入配置 ---
-    cat > "$CONFIG_DIR/ss-config.json" <<EOF
+    mkdir -p "$CONFIG_DIR"
+    cat > "${CONFIG_DIR}/ss.json" <<EOF
 {
     "server": "127.0.0.1",
     "server_port": $SS_PORT,
     "password": "$PASSWORD",
-    "method": "$SS_METHOD",
+    "method": "$METHOD",
     "timeout": 300,
     "mode": "tcp_and_udp"
 }
@@ -196,123 +171,233 @@ EOF
 
     cat > /etc/systemd/system/ss-rust.service <<EOF
 [Unit]
-Description=SS-Rust
+Description=Shadowsocks-Rust Service
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/ssserver -c $CONFIG_DIR/ss-config.json
+ExecStart=${SS_RUST_BIN} -c ${CONFIG_DIR}/ss.json
 Restart=always
-EOF
+LimitNOFILE=51200
 
-    # 移除 --fastopen 以提高兼容性
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+install_stls() {
+    get_arch
+    local ver=$(get_latest_ver "ihciah/shadow-tls")
+    [[ -z "$ver" ]] && ver="v3.3.5"
+    local url="https://github.com/ihciah/shadow-tls/releases/download/${ver}/shadow-tls-${ST_ARCH}"
+    download_file "$url" "$STLS_BIN" "ShadowTLS" || return 1
+    chmod +x "$STLS_BIN"
+    
+    if ! "$STLS_BIN" --version >/dev/null 2>&1; then
+        echo -e "${ERROR} ShadowTLS 二进制文件校验失败 (Exec format error)"
+        return 1
+    fi
+
     cat > /etc/systemd/system/shadowtls.service <<EOF
 [Unit]
-Description=ShadowTLS
+Description=ShadowTLS Service
 After=network.target ss-rust.service
 Requires=ss-rust.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/shadow-tls --v3 server --listen 0.0.0.0:$STLS_PORT --server 127.0.0.1:$SS_PORT --tls $DOMAIN
+Environment=MONOIO_FORCE_LEGACY_DRIVER=1
+ExecStartPre=/bin/sh -c "ulimit -n 51200"
+ExecStart=${STLS_BIN} --v3 --strict server --listen 0.0.0.0:${STLS_PORT} --server 127.0.0.1:${SS_PORT} --tls ${DOMAIN}:443 --password ${PASSWORD}
 Restart=always
-EOF
+LimitNOFILE=51200
 
-    # --- 启动 ---
-    open_firewall "$STLS_PORT"
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+install_all() {
+    check_root
+    install_deps
+    
+    echo -e "\n${Cyan_font_prefix}=== 配置向导 (SS-2022 定制版) ===${RESET}"
+    
+    # 1. 设置 ShadowTLS 端口
+    read -rp "1. 请输入 ShadowTLS 公网端口 (默认 8443): " input_stls_port
+    STLS_PORT=${input_stls_port:-8443}
+    if check_port "$STLS_PORT"; then
+        echo -e "${WARN} 端口 $STLS_PORT 已占用，尝试停止旧服务..."
+        systemctl stop shadowtls ss-rust 2>/dev/null
+    fi
+    
+    # 2. 设置 SS-Rust 端口 (新增自定义)
+    while true; do
+        read -rp "2. 请输入 SS-Rust 内部监听端口 (默认随机): " input_ss_port
+        if [[ -z "$input_ss_port" ]]; then
+            SS_PORT=$(shuf -i 20000-60000 -n 1)
+            echo -e "${INFO} 已随机生成内部端口: $SS_PORT"
+            break
+        else
+            if [[ "$input_ss_port" == "$STLS_PORT" ]]; then
+                echo -e "${ERROR} 内部端口不能与公网端口相同！"
+            elif check_port "$input_ss_port"; then
+                echo -e "${ERROR} 端口 $input_ss_port 已被占用，请更换。"
+            else
+                SS_PORT=$input_ss_port
+                break
+            fi
+        fi
+    done
+    
+    # 3. 伪装域名
+    read -rp "3. 请输入伪装域名 (默认 player.live-video.net): " input_dom
+    DOMAIN=${input_dom:-player.live-video.net}
+    
+    # 4. 加密方式 (SS-2022 专用)
+    echo -e "4. 请选择 SS-2022 加密方式:"
+    echo -e "  1. 2022-blake3-aes-256-gcm (推荐)"
+    echo -e "  2. 2022-blake3-aes-128-gcm"
+    echo -e "  3. 2022-blake3-chacha20-poly1305"
+    read -rp "   请选择 [1-3]: " m_idx
+    case $m_idx in
+        2) 
+            METHOD="2022-blake3-aes-128-gcm"
+            # 128-gcm 需要 16 字节密钥
+            KEY_LEN=16 
+            ;;
+        3) 
+            METHOD="2022-blake3-chacha20-poly1305"
+            # chacha20 需要 32 字节密钥
+            KEY_LEN=32 
+            ;;
+        *) 
+            METHOD="2022-blake3-aes-256-gcm"
+            # 256-gcm 需要 32 字节密钥
+            KEY_LEN=32 
+            ;;
+    esac
+    
+    # 5. 密码生成 (强制合规)
+    echo -e "${INFO} 正在生成符合协议要求的 ${KEY_LEN} 字节密钥..."
+    PASSWORD=$(openssl rand -base64 $KEY_LEN)
+
+    # 执行安装
+    install_ss_rust || return
+    install_stls || return
+    
+    # 保存与启动
+    write_config
+    allow_port "$STLS_PORT"
     systemctl daemon-reload
     systemctl enable ss-rust shadowtls >/dev/null 2>&1
     systemctl restart ss-rust shadowtls
-
-    echo -e "${GREEN}>>> 安装完成，正在检查状态...${RESET}"
-    sleep 2
     
+    echo -e "${INFO} 安装完成，检查状态..."
+    sleep 2
     if systemctl is-active --quiet shadowtls; then
-        show_info_page
+        show_config
     else
-        echo -e "${RED}>>> ShadowTLS 启动失败！${RESET}"
-        echo -e "可能原因: 1.端口占用 2.域名无法连接"
-        echo -e "正在尝试自动显示日志..."
-        sleep 1
-        journalctl -u shadowtls -n 10 --no-pager
-        read -n 1 -s -r -p "按任意键返回..."
+        echo -e "${ERROR} 启动失败！"
+        echo -e "请检查日志: journalctl -u shadowtls -n 20"
+        echo -e "可能原因: 端口占用、域名解析失败、或系统不支持"
     fi
 }
 
-show_info_page() {
-    if [ ! -f "$CONFIG_DIR/ss-config.json" ]; then echo -e "${RED}未安装${RESET}"; return; fi
-    local ss_port=$(jq -r .server_port "$CONFIG_DIR/ss-config.json")
-    local method=$(jq -r .method "$CONFIG_DIR/ss-config.json")
-    local pwd=$(jq -r .password "$CONFIG_DIR/ss-config.json")
-    local stls_port=$(grep "listen 0.0.0.0:" /etc/systemd/system/shadowtls.service | sed 's/.*0.0.0.0:\([0-9]*\).*/\1/')
-    local domain=$(grep "\--tls" /etc/systemd/system/shadowtls.service | awk '{print $NF}')
-    local ip=$(curl -s https://api.ipify.org)
+# --- 4. 信息展示 ---
 
-    # 链接生成
-    local p_arg="shadow-tls;host=$domain"
-    local p_enc=$(url_encode "$p_arg")
-    local u_info=$(echo -n "$method:$pwd" | base64 -w 0)
-    local link="ss://${u_info}@${ip}:${stls_port}/?plugin=${p_enc}#STLS-$domain"
+urlsafe_base64() {
+    echo -n "$1" | base64 | tr -d '\n' | sed 's/+/-/g; s/\//_/g; s/=//g'
+}
 
-    echo -e "\n${YELLOW}[节点配置]${RESET}"
-    echo -e "IP:     $ip"
-    echo -e "端口:   $stls_port"
-    echo -e "密码:   $pwd"
-    echo -e "加密:   $method"
-    echo -e "SNI:    $domain"
-
-    echo -e "\n${YELLOW}[通用链接]${RESET}"
-    echo "$link"
+show_config() {
+    if ! read_config; then echo -e "${ERROR} 未找到配置"; return; fi
+    local ip=$(get_public_ip)
     
-    echo -e "\n${YELLOW}[Mihomo / Clash Meta]${RESET}"
-    cat <<EOF
-proxies:
-  - name: "STLS-$domain"
-    type: ss
-    server: $ip
-    port: $stls_port
-    password: "$pwd"
-    cipher: $method
-    plugin: shadow-tls
-    client-fingerprint: chrome
-    plugin-opts:
-      host: "$domain"
-      version: 3
-EOF
-    echo -e "\n按任意键返回..."
-    read -n 1 -s -r
+    local stls_json="{\"version\":\"3\",\"password\":\"${PASSWORD}\",\"host\":\"${DOMAIN}\",\"port\":\"${STLS_PORT}\",\"address\":\"${ip}\"}"
+    local stls_b64=$(urlsafe_base64 "$stls_json")
+    local userinfo=$(urlsafe_base64 "${METHOD}:${PASSWORD}")
+    local link="ss://${userinfo}@${ip}:${SS_PORT}?shadow-tls=${stls_b64}#STLS-${DOMAIN}"
+
+    clear
+    echo -e "${Green_background_prefix} === SS-2022 + ShadowTLS 配置信息 === ${RESET}"
+    echo -e "IP地址:   ${Cyan_font_prefix}${ip}${RESET}"
+    echo -e "公网端口: ${Cyan_font_prefix}${STLS_PORT}${RESET} (ShadowTLS 监听)"
+    echo -e "内部端口: ${Cyan_font_prefix}${SS_PORT}${RESET} (SS-Rust 监听)"
+    echo -e "密码:     ${Cyan_font_prefix}${PASSWORD}${RESET}"
+    echo -e "加密:     ${Cyan_font_prefix}${METHOD}${RESET}"
+    echo -e "伪装域名: ${Cyan_font_prefix}${DOMAIN}${RESET}"
+    
+    echo -e "\n${Yellow_font_prefix}--- 通用分享链接 ---${RESET}"
+    echo -e "${link}"
+    
+    echo -e "\n${Yellow_font_prefix}--- Mihomo / Clash Meta 配置 ---${RESET}"
+    echo -e "proxies:"
+    echo -e "  - name: STLS-${DOMAIN}"
+    echo -e "    type: ss"
+    echo -e "    server: ${ip}"
+    echo -e "    port: ${STLS_PORT}"
+    echo -e "    password: \"${PASSWORD}\""
+    echo -e "    cipher: ${METHOD}"
+    echo -e "    plugin: shadow-tls"
+    echo -e "    client-fingerprint: chrome"
+    echo -e "    plugin-opts:"
+    echo -e "      host: \"${DOMAIN}\""
+    echo -e "      password: \"${PASSWORD}\""
+    echo -e "      version: 3"
+    
+    echo -e ""
+    read -n 1 -s -r -p "按任意键返回..."
 }
 
 uninstall() {
+    echo -e "${WARN} 正在卸载..."
     systemctl stop ss-rust shadowtls
     systemctl disable ss-rust shadowtls
     rm -f /etc/systemd/system/ss-rust.service /etc/systemd/system/shadowtls.service
-    rm -f /usr/local/bin/ssserver /usr/local/bin/shadow-tls
+    rm -f "$SS_RUST_BIN" "$STLS_BIN"
     rm -rf "$CONFIG_DIR"
     systemctl daemon-reload
-    echo -e "${GREEN}已卸载${RESET}"
+    echo -e "${INFO} 卸载完成"
 }
 
-# --- 初始化 ---
-[ "$(id -u)" != "0" ] && { echo "请 Root 运行"; exit 1; }
-[ ! -f "/usr/local/bin/menu" ] && { cp "$0" /usr/local/bin/menu.sh; chmod +x /usr/local/bin/menu.sh; ln -sf /usr/local/bin/menu.sh /usr/local/bin/menu; }
+# --- 5. 菜单 ---
 
-# --- 主菜单 ---
-while true; do
-    clear
-    show_dashboard
-    echo -e "${GREEN}1.${RESET} 安装/重置 (v3.8 Stable)"
-    echo -e "${GREEN}2.${RESET} 查看连接信息"
-    echo -e "${GREEN}3.${RESET} 卸载服务"
-    echo -e "${YELLOW}4.${RESET} 查看错误日志"
-    echo -e "${GREEN}0.${RESET} 退出"
-    echo ""
-    read -rp "选择: " choice
-    case "$choice" in
-        1) install_logic ;;
-        2) show_info_page ;;
-        3) uninstall ;;
-        4) check_logs ;;
-        0) exit 0 ;;
-    esac
-done
+main_menu() {
+    while true; do
+        clear
+        echo -e "${Cyan_font_prefix}SS-2022 + ShadowTLS 管理脚本 v4.1${RESET}"
+        echo -e "=================================="
+        if [[ -f "$CONFIG_FILE" ]]; then
+            source "$CONFIG_FILE"
+            if systemctl is-active --quiet shadowtls; then
+                echo -e " 状态: ${Green_font_prefix}运行中${RESET} | 端口: $STLS_PORT | SS端口: $SS_PORT"
+            else
+                echo -e " 状态: ${Red_font_prefix}已停止${RESET} | 已安装"
+            fi
+        else
+            echo -e " 状态: ${Red_font_prefix}未安装${RESET}"
+        fi
+        echo -e "=================================="
+        echo -e "${Green_font_prefix}1.${RESET} 安装 / 重置 (自定义端口)"
+        echo -e "${Green_font_prefix}2.${RESET} 查看连接信息"
+        echo -e "${Green_font_prefix}3.${RESET} 重启服务"
+        echo -e "${Green_font_prefix}4.${RESET} 停止服务"
+        echo -e "${Green_font_prefix}5.${RESET} 卸载"
+        echo -e "${Green_font_prefix}0.${RESET} 退出"
+        
+        read -rp "请选择: " num
+        case "$num" in
+            1) install_all ;;
+            2) show_config ;;
+            3) systemctl restart ss-rust shadowtls && echo -e "${INFO} 已重启" && sleep 1 ;;
+            4) systemctl stop ss-rust shadowtls && echo -e "${INFO} 已停止" && sleep 1 ;;
+            5) uninstall ;;
+            0) exit 0 ;;
+            *) echo -e "${ERROR} 无效选项" ;;
+        esac
+    done
+}
+
+check_root
+main_menu
