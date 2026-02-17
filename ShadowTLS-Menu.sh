@@ -1,14 +1,10 @@
 #!/bin/bash
 # ====================================================
-# 作者: jinqians (v4.8 Stable-Hardcoded)
+# 作者: jinqians (v4.9 Final-XZ-Fix)
 # 仓库: https://github.com/connerhsu/ShadowTLS-Menu
 # 描述: SS-Rust + ShadowTLS 一键管理
-# 修复: 移除 GitHub API 查询，内置稳定版本号，修复闪退
+# 修复: 缺少 xz 导致解压失败、移除 jq 依赖、强制覆盖更新
 # ====================================================
-
-# --- 版本配置 (内置稳定版，无需联网查询) ---
-FIXED_SS_VER="v1.18.2"
-FIXED_STLS_VER="v3.3.5"
 
 # --- 配置 ---
 REPO_URL="https://raw.githubusercontent.com/connerhsu/ShadowTLS-Menu/main/ShadowTLS-Menu.sh"
@@ -29,61 +25,88 @@ INFO="${Green}[信息]${RESET}"
 ERROR="${Red}[错误]${RESET}"
 WARN="${Yellow}[警告]${RESET}"
 
-# --- 0. 基础环境检查 ---
+# --- 0. 基础环境检查 (核心修复：强制安装 xz) ---
 check_root() { [[ $EUID -ne 0 ]] && echo -e "${ERROR} 请使用 sudo 或 root 运行" && exit 1; }
 
 install_base_deps() {
-    # 移除 grep/sed 依赖，新增 xz
-    local common_deps=("wget" "curl" "openssl" "tar" "lsof")
+    # 移除 jq，新增 xz (解决解压报错)
+    local common_deps=("wget" "curl" "openssl" "tar" "lsof" "grep" "sed")
     
-    # 识别系统并确定 xz 包名
-    local xz_pkg=""
+    # 识别包管理器和 xz 包名
     local pkg_mgr=""
+    local xz_pkg=""
+    
     if command -v apt-get >/dev/null; then
         pkg_mgr="apt-get"
-        xz_pkg="xz-utils"
+        xz_pkg="xz-utils" # Debian/Ubuntu
     elif command -v dnf >/dev/null; then
         pkg_mgr="dnf"
-        xz_pkg="xz"
+        xz_pkg="xz"       # CentOS 8+
     elif command -v yum >/dev/null; then
         pkg_mgr="yum"
-        xz_pkg="xz"
+        xz_pkg="xz"       # CentOS 7
+    elif command -v apk >/dev/null; then
+        pkg_mgr="apk"
+        xz_pkg="xz"       # Alpine
+    else
+        echo -e "${WARN} 未知系统，尝试继续..."
     fi
 
+    # 检查缺失依赖
     local missing=()
     for dep in "${common_deps[@]}"; do command -v "$dep" >/dev/null 2>&1 || missing+=("$dep"); done
+    
+    # 专门检查 xz 命令
     if ! command -v xz >/dev/null 2>&1; then missing+=("$xz_pkg"); fi
 
     if [[ ${#missing[@]} -gt 0 ]]; then
-        echo -e "${INFO} 安装依赖: ${missing[*]} ..."
+        echo -e "${INFO} 安装缺失依赖: ${missing[*]} ..."
         if [[ "$pkg_mgr" == "apt-get" ]]; then
             $pkg_mgr update -y >/dev/null
             $pkg_mgr install -y "${missing[@]}"
+        elif [[ "$pkg_mgr" == "apk" ]]; then
+            $pkg_mgr add "${missing[@]}"
         elif [[ -n "$pkg_mgr" ]]; then
             $pkg_mgr install -y "${missing[@]}"
         else
-            echo -e "${ERROR} 无法确定包管理器，请手动安装: ${missing[*]}"
-            read -n 1 -s -r -p "按任意键退出..."
+            echo -e "${ERROR} 无法自动安装依赖，请手动安装: ${missing[*]}"
             exit 1
         fi
     fi
 }
 
-# --- 1. 自安装逻辑 ---
+# --- 1. 自安装/强制更新逻辑 ---
 install_global() {
-    if [[ "$0" != "$INSTALL_PATH" ]]; then
-        echo -e "${INFO} 正在安装脚本到系统..."
-        if command -v wget >/dev/null; then wget -qO "$INSTALL_PATH" "$REPO_URL"; else curl -sSL -o "$INSTALL_PATH" "$REPO_URL"; fi
+    # 只要运行此脚本，就强制下载最新版覆盖本地文件 (实现自动更新/覆盖)
+    # 除非当前就是在本地运行且不需要更新，但为了保证一致性，建议每次一键命令都重装
+    
+    # 判断是否是通过 curl 管道运行的 (管道运行 $0 通常是 bash 或 /dev/fd/...)
+    local is_pipe=false
+    if [[ "$0" != "$INSTALL_PATH" ]]; then is_pipe=true; fi
+
+    if $is_pipe; then
+        echo -e "${INFO} 检测到在线运行，正在安装/更新脚本..."
         
+        # 强制覆盖下载
+        if command -v wget >/dev/null; then 
+            wget -qO "$INSTALL_PATH" "$REPO_URL"
+        else 
+            curl -sSL -o "$INSTALL_PATH" "$REPO_URL"
+        fi
+        
+        # 校验下载
         if [[ ! -s "$INSTALL_PATH" ]]; then
-            echo -e "${ERROR} 脚本下载失败！"
+            echo -e "${ERROR} 脚本下载失败！请检查 GitHub 连接。"
             exit 1
         fi
         
         chmod +x "$INSTALL_PATH"
         ln -sf "$INSTALL_PATH" "$BIN_LINK"
-        echo -e "${INFO} 安装完成，切换本地模式..."
+        
+        echo -e "${INFO} 脚本已更新至最新版，正在启动..."
         sleep 1
+        
+        # 移交控制权给本地文件，并强制从 tty 读取输入 (解决交互中断)
         exec bash "$INSTALL_PATH" "$@" < /dev/tty
     fi
 }
@@ -93,7 +116,7 @@ get_arch() {
     case "$(uname -m)" in
         x86_64) SS_ARCH="x86_64-unknown-linux-gnu"; ST_ARCH="x86_64-unknown-linux-musl" ;;
         aarch64) SS_ARCH="aarch64-unknown-linux-gnu"; ST_ARCH="aarch64-unknown-linux-musl" ;;
-        *) echo -e "${ERROR} 不支持架构: $(uname -m)"; read -n 1 -s -r -p "按键退出..."; exit 1 ;;
+        *) echo -e "${ERROR} 不支持架构: $(uname -m)"; exit 1 ;;
     esac
 }
 
@@ -115,22 +138,23 @@ allow_port() {
     fi
 }
 
+# 修复：完全移除 jq，使用 grep 正则提取版本号
+get_ver() { 
+    local repo=$1
+    # 获取 GitHub API 返回的 JSON
+    local json=$(curl -s "https://api.github.com/repos/$repo/releases/latest")
+    # 提取 "tag_name": "v1.2.3" 中的 v1.2.3
+    local v=$(echo "$json" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | sed 's/"tag_name": "//;s/"//')
+    # 如果获取失败，返回空
+    echo "$v"
+}
+
 download_bin() {
     local url=$1; local out=$2; local name=$3
     rm -f "$out"
-    echo -e "${INFO} 下载 $name [版本: $(basename "$url" | grep -o 'v[0-9.]*')]..."
-    
-    if command -v wget >/dev/null; then 
-        wget -qO "$out" "$url"
-    else 
-        curl -sSL -o "$out" "$url"
-    fi
-
-    if [[ ! -s "$out" ]]; then 
-        echo -e "${ERROR} $name 下载失败 (文件为空)！"
-        echo -e "下载地址: $url"
-        return 1
-    fi
+    echo -e "${INFO} 下载 $name..."
+    if command -v wget >/dev/null; then wget -qO "$out" "$url"; else curl -sSL -o "$out" "$url"; fi
+    if [[ ! -s "$out" ]]; then echo -e "${ERROR} $name 下载失败 (文件为空)"; return 1; fi
     chmod +x "$out"
     return 0
 }
@@ -138,18 +162,15 @@ download_bin() {
 # --- 3. 安装流程 ---
 install_ss() {
     get_arch
-    # 直接使用内置版本变量
-    local url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${FIXED_SS_VER}/shadowsocks-${FIXED_SS_VER}.${SS_ARCH}.tar.xz"
+    local v=$(get_ver "shadowsocks/shadowsocks-rust"); [[ -z "$v" ]] && v="v1.18.2"
+    echo -e "${INFO} SS-Rust 版本: $v"
     
-    download_bin "$url" "/tmp/ss.tar.xz" "SS-Rust"
-    if [[ $? -ne 0 ]]; then return 1; fi
+    download_bin "https://github.com/shadowsocks/shadowsocks-rust/releases/download/${v}/shadowsocks-${v}.${SS_ARCH}.tar.xz" "/tmp/ss.tar.xz" "SS-Rust" || return 1
     
     echo -e "${INFO} 解压 SS-Rust..."
+    # 这里如果 xz 没装好，会报错，但我们在 install_base_deps 里强制装了
     tar -xJf /tmp/ss.tar.xz -C /usr/local/bin/ ssserver
-    if [[ ! -f "$SS_RUST_BIN" ]]; then 
-        echo -e "${ERROR} 解压失败，可能是 xz 工具问题。"
-        return 1
-    fi
+    if [[ ! -f "$SS_RUST_BIN" ]]; then echo -e "${ERROR} 解压失败！请检查 xz 是否安装成功"; return 1; fi
     
     chmod +x "$SS_RUST_BIN"; rm -f /tmp/ss.tar.xz
     
@@ -173,16 +194,12 @@ EOF
 
 install_stls() {
     get_arch
-    # 直接使用内置版本变量
-    local url="https://github.com/ihciah/shadow-tls/releases/download/${FIXED_STLS_VER}/shadow-tls-${ST_ARCH}"
+    local v=$(get_ver "ihciah/shadow-tls"); [[ -z "$v" ]] && v="v3.3.5"
+    echo -e "${INFO} ShadowTLS 版本: $v"
     
-    download_bin "$url" "$STLS_BIN" "ShadowTLS"
-    if [[ $? -ne 0 ]]; then return 1; fi
+    download_bin "https://github.com/ihciah/shadow-tls/releases/download/${v}/shadow-tls-${ST_ARCH}" "$STLS_BIN" "ShadowTLS" || return 1
     
-    if ! "$STLS_BIN" --version >/dev/null 2>&1; then 
-        echo -e "${ERROR} ShadowTLS 二进制校验失败 (可能下载损坏)"
-        return 1
-    fi
+    if ! "$STLS_BIN" --version >/dev/null 2>&1; then echo -e "${ERROR} ShadowTLS 二进制校验失败"; return 1; fi
 
     cat > /etc/systemd/system/shadowtls.service <<EOF
 [Unit]
@@ -236,21 +253,8 @@ install_all() {
     PASSWORD=$(openssl rand -base64 $KEY)
     
     echo -e "${INFO} 开始安装..."
-    
-    # 增加错误暂停机制
-    install_ss
-    if [[ $? -ne 0 ]]; then 
-        echo -e "${ERROR} SS-Rust 安装失败，请检查上方报错信息。"
-        read -n 1 -s -r -p "按任意键返回菜单..."
-        return
-    fi
-    
-    install_stls
-    if [[ $? -ne 0 ]]; then 
-        echo -e "${ERROR} ShadowTLS 安装失败，请检查上方报错信息。"
-        read -n 1 -s -r -p "按任意键返回菜单..."
-        return
-    fi
+    install_ss || return
+    install_stls || return
     
     mkdir -p "$CONFIG_DIR"
     echo "STLS_PORT=$STLS_PORT" > "$CONFIG_FILE"
@@ -301,7 +305,7 @@ uninstall() {
 menu() {
     while true; do
         clear
-        echo -e "${Cyan}ShadowTLS-Menu v4.8${RESET}"
+        echo -e "${Cyan}ShadowTLS-Menu v4.9${RESET}"
         if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; echo -e "状态: $(systemctl is-active --quiet shadowtls && echo "${Green}运行${RESET}" || echo "${Red}停止${RESET}") | 端口: $STLS_PORT"; else echo "状态: 未安装"; fi
         echo "------------------------"
         echo "1. 安装 / 重置"
@@ -317,6 +321,6 @@ menu() {
 
 # --- 执行入口 ---
 check_root
-install_base_deps
-install_global "$@"
+install_base_deps  # 必须最优先执行！解决 xz 问题
+install_global "$@" # 必须第二执行！解决自动更新和交互问题
 menu
