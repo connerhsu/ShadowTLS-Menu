@@ -1,13 +1,12 @@
 #!/bin/bash
 # ====================================================
-# 作者: jinqians (v4.4 Auto-Bootstrap)
+# 作者: jinqians (v4.5 TTY-Fix)
 # 仓库: https://github.com/connerhsu/ShadowTLS-Menu
 # 描述: SS-Rust + ShadowTLS 一键管理
-# 特性: 支持 curl 管道运行、自动修复文件权限、直连下载
+# 特性: 修复 curl 管道运行时的交互中断问题、增加默认值显示
 # ====================================================
 
-# --- 配置 ---
-# 请确保这里是您的真实脚本 Raw 地址
+# --- 配置 (请修改为您的真实地址) ---
 REPO_URL="https://raw.githubusercontent.com/connerhsu/ShadowTLS-Menu/main/ShadowTLS-Menu.sh"
 INSTALL_PATH="/usr/local/bin/menu.sh"
 BIN_LINK="/usr/local/bin/menu"
@@ -26,27 +25,27 @@ INFO="${Green_font_prefix}[信息]${RESET}"
 ERROR="${Red_font_prefix}[错误]${RESET}"
 WARN="${Yellow_font_prefix}[警告]${RESET}"
 
-# --- 自安装逻辑 (核心修复) ---
+# --- 自安装逻辑 (核心修复：解决管道运行退出问题) ---
 install_global() {
-    # 如果当前运行的不是安装好的文件，则进行安装并重启
+    # 如果不是本地安装路径，或者脚本是通过 curl 管道运行的
     if [[ "$0" != "$INSTALL_PATH" ]]; then
-        echo -e "${INFO} 检测到在线/临时运行，正在安装脚本到系统..."
+        echo -e "${INFO} 检测到在线运行，正在安装到系统..."
         
-        # 强制从仓库下载最新版，确保是完整文件
+        # 下载自身
         wget -qO "$INSTALL_PATH" "$REPO_URL"
-        
         if [[ ! -s "$INSTALL_PATH" ]]; then
-            echo -e "${ERROR} 脚本下载失败！请检查网络或 GitHub 地址。"
+            echo -e "${ERROR} 脚本下载失败！请检查 GitHub 地址是否正确。"
             exit 1
         fi
         
         chmod +x "$INSTALL_PATH"
         ln -sf "$INSTALL_PATH" "$BIN_LINK"
         
-        echo -e "${INFO} 安装完成，正在切换至本地模式..."
+        echo -e "${INFO} 安装完成，正在启动..."
         sleep 1
-        # 移交控制权给本地脚本，解决管道运行时的 stdin 问题
-        exec "$INSTALL_PATH" "$@"
+        
+        # 关键修复：从 /dev/tty 读取输入，防止 read 命令读取到 EOF 导致退出
+        exec bash "$INSTALL_PATH" "$@" < /dev/tty
     fi
 }
 
@@ -95,7 +94,7 @@ get_ver() {
 
 download() {
     local url=$1; local out=$2; local name=$3
-    rm -f "$out" # 必须先删除旧文件
+    rm -f "$out"
     echo -e "${INFO} 下载 $name..."
     wget --show-progress -qO "$out" "$url"
     if [[ ! -s "$out" ]]; then echo -e "${ERROR} $name 下载失败 (空文件)"; return 1; fi
@@ -133,7 +132,6 @@ install_stls() {
     download "https://github.com/ihciah/shadow-tls/releases/download/${v}/shadow-tls-${ST_ARCH}" "$STLS_BIN" "ShadowTLS" || return 1
     chmod +x "$STLS_BIN"
     
-    # 校验
     if ! "$STLS_BIN" --version >/dev/null 2>&1; then echo -e "${ERROR} ShadowTLS 二进制校验失败 (Exec format error)"; return 1; fi
 
     cat > /etc/systemd/system/shadowtls.service <<EOF
@@ -155,38 +153,77 @@ EOF
 
 install_all() {
     echo -e "\n${Cyan_font_prefix}=== 配置向导 ===${RESET}"
-    read -rp "1. ShadowTLS 公网端口 (默认 8443): " p; STLS_PORT=${p:-8443}
+    
+    # 修复交互：明确提示默认值，处理空输入
+    read -rp "1. ShadowTLS 公网端口 (默认 8443): " p
+    STLS_PORT=${p:-8443}
+    
     if check_port "$STLS_PORT"; then systemctl stop shadowtls ss-rust 2>/dev/null; fi
     
     while true; do
         read -rp "2. SS-Rust 内部端口 (默认随机): " p
-        if [[ -z "$p" ]]; then SS_PORT=$(shuf -i 20000-60000 -n 1); echo -e "${INFO} 随机端口: $SS_PORT"; break; fi
-        if [[ "$p" == "$STLS_PORT" ]]; then echo -e "${ERROR} 不能与公网端口相同"; else SS_PORT=$p; break; fi
+        if [[ -z "$p" ]]; then 
+            SS_PORT=$(shuf -i 20000-60000 -n 1)
+            echo -e "${INFO} 已生成随机端口: ${Green_font_prefix}$SS_PORT${RESET}"
+            break
+        fi
+        if [[ "$p" == "$STLS_PORT" ]]; then 
+            echo -e "${ERROR} 内部端口不能与公网端口相同"; 
+        else 
+            SS_PORT=$p
+            break
+        fi
     done
     
-    read -rp "3. 伪装域名 (默认 player.live-video.net): " d; DOMAIN=${d:-player.live-video.net}
+    read -rp "3. 伪装域名 (默认 player.live-video.net): " d
+    DOMAIN=${d:-player.live-video.net}
     
-    echo "4. 加密方式 (推荐 SS-2022)"; echo "   1. 2022-blake3-aes-256-gcm"; echo "   2. 2022-blake3-aes-128-gcm"; echo "   3. 2022-blake3-chacha20-poly1305"
-    read -rp "   选择 [1-3]: " m
+    echo "4. 加密方式 (推荐 SS-2022)"
+    echo "   1. 2022-blake3-aes-256-gcm"
+    echo "   2. 2022-blake3-aes-128-gcm"
+    echo "   3. 2022-blake3-chacha20-poly1305"
+    
+    # 修复交互：处理回车默认值
+    read -rp "   选择 [1-3] (默认 1): " m
+    m=${m:-1}  # 如果输入为空，则默认为 1
+    
     case $m in
         2) METHOD="2022-blake3-aes-128-gcm"; KEY=16 ;;
         3) METHOD="2022-blake3-chacha20-poly1305"; KEY=32 ;;
         *) METHOD="2022-blake3-aes-256-gcm"; KEY=32 ;;
     esac
+    
+    echo -e "${INFO} 已选择加密: ${Green_font_prefix}$METHOD${RESET}"
+    echo -e "${INFO} 正在生成密钥..."
     PASSWORD=$(openssl rand -base64 $KEY)
     
-    install_ss_rust || return; install_stls || return
+    # 开始安装
+    install_ss_rust || return
+    install_stls || return
     
+    # 写入配置
     mkdir -p "$CONFIG_DIR"
-    echo "STLS_PORT=$STLS_PORT" > "$CONFIG_FILE"; echo "SS_PORT=$SS_PORT" >> "$CONFIG_FILE"
-    echo "PASSWORD=$PASSWORD" >> "$CONFIG_FILE"; echo "METHOD=$METHOD" >> "$CONFIG_FILE"; echo "DOMAIN=$DOMAIN" >> "$CONFIG_FILE"
+    echo "STLS_PORT=$STLS_PORT" > "$CONFIG_FILE"
+    echo "SS_PORT=$SS_PORT" >> "$CONFIG_FILE"
+    echo "PASSWORD=$PASSWORD" >> "$CONFIG_FILE"
+    echo "METHOD=$METHOD" >> "$CONFIG_FILE"
+    echo "DOMAIN=$DOMAIN" >> "$CONFIG_FILE"
     
+    # 启动服务
     allow_port "$STLS_PORT"
-    systemctl daemon-reload; systemctl enable ss-rust shadowtls >/dev/null 2>&1
+    systemctl daemon-reload
+    systemctl enable ss-rust shadowtls >/dev/null 2>&1
     systemctl restart ss-rust shadowtls
     
-    sleep 2
-    if systemctl is-active --quiet shadowtls; then show_conf; else echo -e "${ERROR} 启动失败，请检查日志"; fi
+    echo -e "${INFO} 服务启动中..."
+    sleep 3
+    
+    if systemctl is-active --quiet shadowtls; then 
+        show_conf
+    else 
+        echo -e "${ERROR} 启动失败！"
+        echo -e "请运行: journalctl -u shadowtls -n 20 查看日志"
+    fi
 }
 
 show_conf() {
@@ -218,7 +255,7 @@ uninstall() {
 menu() {
     while true; do
         clear
-        echo -e "${Cyan_font_prefix}ShadowTLS-Menu v4.4${RESET}"
+        echo -e "${Cyan_font_prefix}ShadowTLS-Menu v4.5${RESET}"
         if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; echo -e "状态: $(systemctl is-active --quiet shadowtls && echo "${Green_font_prefix}运行${RESET}" || echo "${Red_font_prefix}停止${RESET}") | 端口: $STLS_PORT"; else echo "状态: 未安装"; fi
         echo "------------------------"
         echo "1. 安装 / 重置"
@@ -232,7 +269,8 @@ menu() {
     done
 }
 
+# --- 入口 ---
 check_root
-install_global "$@" # 传递参数
+install_global "$@"
 install_deps
 menu
