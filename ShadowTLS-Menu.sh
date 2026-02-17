@@ -1,12 +1,12 @@
 #!/bin/bash
 # ====================================================
-# 作者: jinqians (v4.6 Final-Fix)
+# 作者: jinqians (v4.7 Emergency-Fix)
 # 仓库: https://github.com/connerhsu/ShadowTLS-Menu
 # 描述: SS-Rust + ShadowTLS 一键管理
-# 修复: 依赖缺失导致自安装失败、管道运行交互中断
+# 修复: 移除 jq 依赖，增加 xz 解压工具，修复极简系统报错
 # ====================================================
 
-# --- 配置 (请修改为您的真实地址) ---
+# --- 配置 ---
 REPO_URL="https://raw.githubusercontent.com/connerhsu/ShadowTLS-Menu/main/ShadowTLS-Menu.sh"
 INSTALL_PATH="/usr/local/bin/menu.sh"
 BIN_LINK="/usr/local/bin/menu"
@@ -25,56 +25,62 @@ INFO="${Green}[信息]${RESET}"
 ERROR="${Red}[错误]${RESET}"
 WARN="${Yellow}[警告]${RESET}"
 
-# --- 0. 基础环境检查 (最优先运行) ---
+# --- 0. 基础环境检查 (核心修复) ---
 check_root() { [[ $EUID -ne 0 ]] && echo -e "${ERROR} 请使用 sudo 或 root 运行" && exit 1; }
 
-# 修复：先安装基础工具，防止后面下载自身失败
 install_base_deps() {
-    local deps=("wget" "curl" "openssl" "jq" "tar" "lsof")
-    local missing=()
-    for dep in "${deps[@]}"; do command -v "$dep" >/dev/null 2>&1 || missing+=("$dep"); done
+    # 基础依赖列表 (移除 jq，新增 xz)
+    local common_deps=("wget" "curl" "openssl" "tar" "lsof" "grep" "sed")
     
+    # 识别系统并确定 xz 包名
+    local xz_pkg=""
+    if command -v apt-get >/dev/null; then
+        pkg_mgr="apt-get"
+        xz_pkg="xz-utils" # Debian/Ubuntu 叫 xz-utils
+    elif command -v dnf >/dev/null; then
+        pkg_mgr="dnf"
+        xz_pkg="xz"       # CentOS 叫 xz
+    elif command -v yum >/dev/null; then
+        pkg_mgr="yum"
+        xz_pkg="xz"
+    else
+        echo -e "${ERROR} 未知系统，无法自动安装依赖。"
+        exit 1
+    fi
+
+    # 检查缺失并安装
+    local missing=()
+    for dep in "${common_deps[@]}"; do command -v "$dep" >/dev/null 2>&1 || missing+=("$dep"); done
+    
+    # 额外检查 xz 是否安装 (xz 命令通常在 xz-utils 包里)
+    if ! command -v xz >/dev/null 2>&1; then missing+=("$xz_pkg"); fi
+
     if [[ ${#missing[@]} -gt 0 ]]; then
-        echo -e "${INFO} 正在安装基础依赖: ${missing[*]} ..."
-        if command -v apt-get >/dev/null; then
-            apt-get update -y >/dev/null && apt-get install -y "${missing[@]}"
-        elif command -v dnf >/dev/null; then
-            dnf install -y "${missing[@]}"
-        elif command -v yum >/dev/null; then
-            yum install -y "${missing[@]}"
+        echo -e "${INFO} 正在安装缺失依赖: ${missing[*]} ..."
+        if [[ "$pkg_mgr" == "apt-get" ]]; then
+            $pkg_mgr update -y >/dev/null
+            $pkg_mgr install -y "${missing[@]}"
         else
-            echo -e "${ERROR} 无法自动安装依赖，请手动安装: ${missing[*]}" && exit 1
+            $pkg_mgr install -y "${missing[@]}"
         fi
     fi
 }
 
-# --- 1. 自安装/自更新逻辑 (解决管道运行问题) ---
+# --- 1. 自安装/自更新逻辑 ---
 install_global() {
-    # 判断条件：如果当前脚本不是安装路径下的文件
     if [[ "$0" != "$INSTALL_PATH" ]]; then
         echo -e "${INFO} 检测到在线/管道运行，正在安装到系统..."
+        if command -v wget >/dev/null; then wget -qO "$INSTALL_PATH" "$REPO_URL"; else curl -sSL -o "$INSTALL_PATH" "$REPO_URL"; fi
         
-        # 尝试使用 wget 或 curl 下载自身
-        if command -v wget >/dev/null; then
-            wget -qO "$INSTALL_PATH" "$REPO_URL"
-        else
-            curl -sSL -o "$INSTALL_PATH" "$REPO_URL"
-        fi
-        
-        # 校验下载是否成功
         if [[ ! -s "$INSTALL_PATH" ]]; then
-            echo -e "${ERROR} 脚本下载失败！无法连接 GitHub。"
-            echo -e "请尝试检查网络或手动下载。"
+            echo -e "${ERROR} 脚本下载失败！请检查网络。"
             exit 1
         fi
         
         chmod +x "$INSTALL_PATH"
         ln -sf "$INSTALL_PATH" "$BIN_LINK"
-        
-        echo -e "${INFO} 安装完成，正在切换至本地模式..."
+        echo -e "${INFO} 安装完成，切换至本地模式..."
         sleep 1
-        
-        # 关键修复：强制从 tty 读取输入，防止 read 命令失效
         exec bash "$INSTALL_PATH" "$@" < /dev/tty
     fi
 }
@@ -106,9 +112,13 @@ allow_port() {
     fi
 }
 
+# 修复：移除 jq 依赖，改用 grep/sed
 get_ver() { 
-    local v=$(curl -s "https://api.github.com/repos/$1/releases/latest" | jq -r .tag_name)
-    [[ -z "$v" || "$v" == "null" ]] && echo "" || echo "$v"
+    local repo=$1
+    # 尝试获取 latest tag
+    local v=$(curl -s "https://api.github.com/repos/$repo/releases/latest" | grep -o '"tag_name": ".*"' | sed 's/"tag_name": "//;s/"//')
+    # 如果获取失败，返回空，后续会使用 fallback
+    echo "$v"
 }
 
 download_bin() {
@@ -125,8 +135,15 @@ download_bin() {
 install_ss() {
     get_arch
     local v=$(get_ver "shadowsocks/shadowsocks-rust"); [[ -z "$v" ]] && v="v1.18.2"
+    echo -e "${INFO} 版本: $v"
     download_bin "https://github.com/shadowsocks/shadowsocks-rust/releases/download/${v}/shadowsocks-${v}.${SS_ARCH}.tar.xz" "/tmp/ss.tar.xz" "SS-Rust" || return 1
-    tar -xJf /tmp/ss.tar.xz -C /usr/local/bin/ ssserver; chmod +x "$SS_RUST_BIN"; rm -f /tmp/ss.tar.xz
+    
+    echo -e "${INFO} 解压 SS-Rust..."
+    # xz 必须已安装，否则这里会报错
+    tar -xJf /tmp/ss.tar.xz -C /usr/local/bin/ ssserver
+    if [[ ! -f "$SS_RUST_BIN" ]]; then echo -e "${ERROR} 解压失败，可能缺少 xz 工具"; return 1; fi
+    
+    chmod +x "$SS_RUST_BIN"; rm -f /tmp/ss.tar.xz
     
     mkdir -p "$CONFIG_DIR"
     cat > "${CONFIG_DIR}/ss.json" <<EOF
@@ -149,9 +166,10 @@ EOF
 install_stls() {
     get_arch
     local v=$(get_ver "ihciah/shadow-tls"); [[ -z "$v" ]] && v="v3.3.5"
+    echo -e "${INFO} 版本: $v"
     download_bin "https://github.com/ihciah/shadow-tls/releases/download/${v}/shadow-tls-${ST_ARCH}" "$STLS_BIN" "ShadowTLS" || return 1
     
-    if ! "$STLS_BIN" --version >/dev/null 2>&1; then echo -e "${ERROR} ShadowTLS 二进制校验失败 (Exec format error)"; return 1; fi
+    if ! "$STLS_BIN" --version >/dev/null 2>&1; then echo -e "${ERROR} ShadowTLS 二进制校验失败"; return 1; fi
 
     cat > /etc/systemd/system/shadowtls.service <<EOF
 [Unit]
@@ -173,12 +191,10 @@ EOF
 install_all() {
     echo -e "\n${Cyan}=== 配置向导 ===${RESET}"
     
-    # 交互 1: 公网端口
     read -rp "1. ShadowTLS 公网端口 (默认 8443): " p
     STLS_PORT=${p:-8443}
     if check_port "$STLS_PORT"; then systemctl stop shadowtls ss-rust 2>/dev/null; fi
     
-    # 交互 2: 内部端口
     while true; do
         read -rp "2. SS-Rust 内部端口 (默认随机): " p
         if [[ -z "$p" ]]; then 
@@ -186,19 +202,12 @@ install_all() {
             echo -e "${INFO} 已生成随机端口: ${Green}$SS_PORT${RESET}"
             break
         fi
-        if [[ "$p" == "$STLS_PORT" ]]; then 
-            echo -e "${ERROR} 内部端口不能与公网端口相同"; 
-        else 
-            SS_PORT=$p
-            break
-        fi
+        if [[ "$p" == "$STLS_PORT" ]]; then echo -e "${ERROR} 冲突"; else SS_PORT=$p; break; fi
     done
     
-    # 交互 3: 域名
     read -rp "3. 伪装域名 (默认 player.live-video.net): " d
     DOMAIN=${d:-player.live-video.net}
     
-    # 交互 4: 加密 (修复默认值逻辑)
     echo "4. 加密方式 (推荐 SS-2022)"
     echo "   1. 2022-blake3-aes-256-gcm"
     echo "   2. 2022-blake3-aes-128-gcm"
@@ -213,11 +222,10 @@ install_all() {
     esac
     PASSWORD=$(openssl rand -base64 $KEY)
     
-    echo -e "${INFO} 正在安装服务..."
+    echo -e "${INFO} 开始安装..."
     install_ss || return
     install_stls || return
     
-    # 写入配置
     mkdir -p "$CONFIG_DIR"
     echo "STLS_PORT=$STLS_PORT" > "$CONFIG_FILE"
     echo "SS_PORT=$SS_PORT" >> "$CONFIG_FILE"
@@ -230,7 +238,7 @@ install_all() {
     systemctl enable ss-rust shadowtls >/dev/null 2>&1
     systemctl restart ss-rust shadowtls
     
-    echo -e "${INFO} 安装完成，等待启动..."
+    echo -e "${INFO} 服务启动中..."
     sleep 3
     if systemctl is-active --quiet shadowtls; then show_conf; else echo -e "${ERROR} 启动失败，请检查日志"; fi
 }
@@ -239,7 +247,6 @@ show_conf() {
     [[ ! -f "$CONFIG_FILE" ]] && echo -e "${ERROR} 未配置" && return
     source "$CONFIG_FILE"; local ip=$(get_public_ip)
     
-    # URL Safe Base64 处理
     local sj="{\"version\":\"3\",\"password\":\"${PASSWORD}\",\"host\":\"${DOMAIN}\",\"port\":\"${STLS_PORT}\",\"address\":\"${ip}\"}"
     local sb=$(echo -n "$sj" | base64 -w 0 | tr -d '\n' | sed 's/+/-/g; s/\//_/g; s/=//g')
     local ui=$(echo -n "${METHOD}:${PASSWORD}" | base64 -w 0 | tr -d '\n' | sed 's/+/-/g; s/\//_/g; s/=//g')
@@ -268,7 +275,7 @@ uninstall() {
 menu() {
     while true; do
         clear
-        echo -e "${Cyan}ShadowTLS-Menu v4.6${RESET}"
+        echo -e "${Cyan}ShadowTLS-Menu v4.7${RESET}"
         if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; echo -e "状态: $(systemctl is-active --quiet shadowtls && echo "${Green}运行${RESET}" || echo "${Red}停止${RESET}") | 端口: $STLS_PORT"; else echo "状态: 未安装"; fi
         echo "------------------------"
         echo "1. 安装 / 重置"
@@ -284,6 +291,6 @@ menu() {
 
 # --- 执行入口 ---
 check_root
-install_base_deps  # 必须最先执行，确保有 wget/curl
-install_global "$@" # 必须第二执行，确保切出管道
+install_base_deps  # 必须优先执行
+install_global "$@"
 menu
