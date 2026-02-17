@@ -1,9 +1,9 @@
 #!/bin/bash
 # ====================================================
-# 作者: jinqians (v4.9 Final-XZ-Fix)
+# 作者: jinqians (v4.10 Mihomo-Fix)
 # 仓库: https://github.com/connerhsu/ShadowTLS-Menu
 # 描述: SS-Rust + ShadowTLS 一键管理
-# 修复: 缺少 xz 导致解压失败、移除 jq 依赖、强制覆盖更新
+# 修复: Mihomo/Clash Meta 配置格式缩进错误
 # ====================================================
 
 # --- 配置 ---
@@ -25,88 +25,40 @@ INFO="${Green}[信息]${RESET}"
 ERROR="${Red}[错误]${RESET}"
 WARN="${Yellow}[警告]${RESET}"
 
-# --- 0. 基础环境检查 (核心修复：强制安装 xz) ---
+# --- 0. 基础环境检查 ---
 check_root() { [[ $EUID -ne 0 ]] && echo -e "${ERROR} 请使用 sudo 或 root 运行" && exit 1; }
 
 install_base_deps() {
-    # 移除 jq，新增 xz (解决解压报错)
     local common_deps=("wget" "curl" "openssl" "tar" "lsof" "grep" "sed")
-    
-    # 识别包管理器和 xz 包名
     local pkg_mgr=""
     local xz_pkg=""
     
-    if command -v apt-get >/dev/null; then
-        pkg_mgr="apt-get"
-        xz_pkg="xz-utils" # Debian/Ubuntu
-    elif command -v dnf >/dev/null; then
-        pkg_mgr="dnf"
-        xz_pkg="xz"       # CentOS 8+
-    elif command -v yum >/dev/null; then
-        pkg_mgr="yum"
-        xz_pkg="xz"       # CentOS 7
-    elif command -v apk >/dev/null; then
-        pkg_mgr="apk"
-        xz_pkg="xz"       # Alpine
-    else
-        echo -e "${WARN} 未知系统，尝试继续..."
-    fi
+    if command -v apt-get >/dev/null; then pkg_mgr="apt-get"; xz_pkg="xz-utils";
+    elif command -v dnf >/dev/null; then pkg_mgr="dnf"; xz_pkg="xz";
+    elif command -v yum >/dev/null; then pkg_mgr="yum"; xz_pkg="xz";
+    elif command -v apk >/dev/null; then pkg_mgr="apk"; xz_pkg="xz"; fi
 
-    # 检查缺失依赖
     local missing=()
     for dep in "${common_deps[@]}"; do command -v "$dep" >/dev/null 2>&1 || missing+=("$dep"); done
-    
-    # 专门检查 xz 命令
     if ! command -v xz >/dev/null 2>&1; then missing+=("$xz_pkg"); fi
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo -e "${INFO} 安装缺失依赖: ${missing[*]} ..."
-        if [[ "$pkg_mgr" == "apt-get" ]]; then
-            $pkg_mgr update -y >/dev/null
-            $pkg_mgr install -y "${missing[@]}"
-        elif [[ "$pkg_mgr" == "apk" ]]; then
-            $pkg_mgr add "${missing[@]}"
-        elif [[ -n "$pkg_mgr" ]]; then
-            $pkg_mgr install -y "${missing[@]}"
-        else
-            echo -e "${ERROR} 无法自动安装依赖，请手动安装: ${missing[*]}"
-            exit 1
-        fi
+        if [[ "$pkg_mgr" == "apt-get" ]]; then $pkg_mgr update -y >/dev/null && $pkg_mgr install -y "${missing[@]}";
+        elif [[ "$pkg_mgr" == "apk" ]]; then $pkg_mgr add "${missing[@]}";
+        elif [[ -n "$pkg_mgr" ]]; then $pkg_mgr install -y "${missing[@]}";
+        else echo -e "${ERROR} 无法自动安装依赖，请手动安装: ${missing[*]}"; exit 1; fi
     fi
 }
 
-# --- 1. 自安装/强制更新逻辑 ---
+# --- 1. 自安装逻辑 ---
 install_global() {
-    # 只要运行此脚本，就强制下载最新版覆盖本地文件 (实现自动更新/覆盖)
-    # 除非当前就是在本地运行且不需要更新，但为了保证一致性，建议每次一键命令都重装
-    
-    # 判断是否是通过 curl 管道运行的 (管道运行 $0 通常是 bash 或 /dev/fd/...)
-    local is_pipe=false
-    if [[ "$0" != "$INSTALL_PATH" ]]; then is_pipe=true; fi
-
-    if $is_pipe; then
-        echo -e "${INFO} 检测到在线运行，正在安装/更新脚本..."
-        
-        # 强制覆盖下载
-        if command -v wget >/dev/null; then 
-            wget -qO "$INSTALL_PATH" "$REPO_URL"
-        else 
-            curl -sSL -o "$INSTALL_PATH" "$REPO_URL"
-        fi
-        
-        # 校验下载
-        if [[ ! -s "$INSTALL_PATH" ]]; then
-            echo -e "${ERROR} 脚本下载失败！请检查 GitHub 连接。"
-            exit 1
-        fi
-        
+    if [[ "$0" != "$INSTALL_PATH" ]]; then
+        # 强制下载覆盖 (update)
+        if command -v wget >/dev/null; then wget -qO "$INSTALL_PATH" "$REPO_URL"; else curl -sSL -o "$INSTALL_PATH" "$REPO_URL"; fi
+        if [[ ! -s "$INSTALL_PATH" ]]; then echo -e "${ERROR} 脚本下载失败！"; exit 1; fi
         chmod +x "$INSTALL_PATH"
         ln -sf "$INSTALL_PATH" "$BIN_LINK"
-        
-        echo -e "${INFO} 脚本已更新至最新版，正在启动..."
-        sleep 1
-        
-        # 移交控制权给本地文件，并强制从 tty 读取输入 (解决交互中断)
         exec bash "$INSTALL_PATH" "$@" < /dev/tty
     fi
 }
@@ -132,20 +84,12 @@ check_port() { lsof -i:"$1" >/dev/null 2>&1; }
 allow_port() {
     local p=$1
     if command -v ufw >/dev/null; then ufw allow "$p" >/dev/null 2>&1; fi
-    if command -v iptables >/dev/null; then 
-        iptables -I INPUT -p tcp --dport "$p" -j ACCEPT >/dev/null 2>&1
-        iptables -I INPUT -p udp --dport "$p" -j ACCEPT >/dev/null 2>&1
-    fi
+    if command -v iptables >/dev/null; then iptables -I INPUT -p tcp --dport "$p" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p udp --dport "$p" -j ACCEPT >/dev/null 2>&1; fi
 }
 
-# 修复：完全移除 jq，使用 grep 正则提取版本号
 get_ver() { 
     local repo=$1
-    # 获取 GitHub API 返回的 JSON
-    local json=$(curl -s "https://api.github.com/repos/$repo/releases/latest")
-    # 提取 "tag_name": "v1.2.3" 中的 v1.2.3
-    local v=$(echo "$json" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | sed 's/"tag_name": "//;s/"//')
-    # 如果获取失败，返回空
+    local v=$(curl -s "https://api.github.com/repos/$repo/releases/latest" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | sed 's/"tag_name": "//;s/"//')
     echo "$v"
 }
 
@@ -154,7 +98,7 @@ download_bin() {
     rm -f "$out"
     echo -e "${INFO} 下载 $name..."
     if command -v wget >/dev/null; then wget -qO "$out" "$url"; else curl -sSL -o "$out" "$url"; fi
-    if [[ ! -s "$out" ]]; then echo -e "${ERROR} $name 下载失败 (文件为空)"; return 1; fi
+    if [[ ! -s "$out" ]]; then echo -e "${ERROR} $name 下载失败"; return 1; fi
     chmod +x "$out"
     return 0
 }
@@ -164,14 +108,8 @@ install_ss() {
     get_arch
     local v=$(get_ver "shadowsocks/shadowsocks-rust"); [[ -z "$v" ]] && v="v1.18.2"
     echo -e "${INFO} SS-Rust 版本: $v"
-    
     download_bin "https://github.com/shadowsocks/shadowsocks-rust/releases/download/${v}/shadowsocks-${v}.${SS_ARCH}.tar.xz" "/tmp/ss.tar.xz" "SS-Rust" || return 1
-    
-    echo -e "${INFO} 解压 SS-Rust..."
-    # 这里如果 xz 没装好，会报错，但我们在 install_base_deps 里强制装了
     tar -xJf /tmp/ss.tar.xz -C /usr/local/bin/ ssserver
-    if [[ ! -f "$SS_RUST_BIN" ]]; then echo -e "${ERROR} 解压失败！请检查 xz 是否安装成功"; return 1; fi
-    
     chmod +x "$SS_RUST_BIN"; rm -f /tmp/ss.tar.xz
     
     mkdir -p "$CONFIG_DIR"
@@ -196,10 +134,8 @@ install_stls() {
     get_arch
     local v=$(get_ver "ihciah/shadow-tls"); [[ -z "$v" ]] && v="v3.3.5"
     echo -e "${INFO} ShadowTLS 版本: $v"
-    
     download_bin "https://github.com/ihciah/shadow-tls/releases/download/${v}/shadow-tls-${ST_ARCH}" "$STLS_BIN" "ShadowTLS" || return 1
-    
-    if ! "$STLS_BIN" --version >/dev/null 2>&1; then echo -e "${ERROR} ShadowTLS 二进制校验失败"; return 1; fi
+    if ! "$STLS_BIN" --version >/dev/null 2>&1; then echo -e "${ERROR} 校验失败"; return 1; fi
 
     cat > /etc/systemd/system/shadowtls.service <<EOF
 [Unit]
@@ -221,30 +157,20 @@ EOF
 install_all() {
     echo -e "\n${Cyan}=== 配置向导 ===${RESET}"
     
-    read -rp "1. ShadowTLS 公网端口 (默认 8443): " p
-    STLS_PORT=${p:-8443}
+    read -rp "1. ShadowTLS 公网端口 (默认 8443): " p; STLS_PORT=${p:-8443}
     if check_port "$STLS_PORT"; then systemctl stop shadowtls ss-rust 2>/dev/null; fi
     
     while true; do
         read -rp "2. SS-Rust 内部端口 (默认随机): " p
-        if [[ -z "$p" ]]; then 
-            SS_PORT=$(shuf -i 20000-60000 -n 1)
-            echo -e "${INFO} 已生成随机端口: ${Green}$SS_PORT${RESET}"
-            break
-        fi
+        if [[ -z "$p" ]]; then SS_PORT=$(shuf -i 20000-60000 -n 1); echo -e "${INFO} 随机端口: ${Green}$SS_PORT${RESET}"; break; fi
         if [[ "$p" == "$STLS_PORT" ]]; then echo -e "${ERROR} 冲突"; else SS_PORT=$p; break; fi
     done
     
-    read -rp "3. 伪装域名 (默认 player.live-video.net): " d
-    DOMAIN=${d:-player.live-video.net}
+    read -rp "3. 伪装域名 (默认 player.live-video.net): " d; DOMAIN=${d:-player.live-video.net}
     
     echo "4. 加密方式 (推荐 SS-2022)"
-    echo "   1. 2022-blake3-aes-256-gcm"
-    echo "   2. 2022-blake3-aes-128-gcm"
-    echo "   3. 2022-blake3-chacha20-poly1305"
-    read -rp "   选择 [1-3] (默认 1): " m
-    m=${m:-1}
-    
+    echo "   1. 2022-blake3-aes-256-gcm"; echo "   2. 2022-blake3-aes-128-gcm"; echo "   3. 2022-blake3-chacha20-poly1305"
+    read -rp "   选择 [1-3] (默认 1): " m; m=${m:-1}
     case $m in
         2) METHOD="2022-blake3-aes-128-gcm"; KEY=16 ;;
         3) METHOD="2022-blake3-chacha20-poly1305"; KEY=32 ;;
@@ -253,24 +179,19 @@ install_all() {
     PASSWORD=$(openssl rand -base64 $KEY)
     
     echo -e "${INFO} 开始安装..."
-    install_ss || return
-    install_stls || return
+    install_ss || return; install_stls || return
     
     mkdir -p "$CONFIG_DIR"
-    echo "STLS_PORT=$STLS_PORT" > "$CONFIG_FILE"
-    echo "SS_PORT=$SS_PORT" >> "$CONFIG_FILE"
-    echo "PASSWORD=$PASSWORD" >> "$CONFIG_FILE"
-    echo "METHOD=$METHOD" >> "$CONFIG_FILE"
-    echo "DOMAIN=$DOMAIN" >> "$CONFIG_FILE"
+    echo "STLS_PORT=$STLS_PORT" > "$CONFIG_FILE"; echo "SS_PORT=$SS_PORT" >> "$CONFIG_FILE"
+    echo "PASSWORD=$PASSWORD" >> "$CONFIG_FILE"; echo "METHOD=$METHOD" >> "$CONFIG_FILE"; echo "DOMAIN=$DOMAIN" >> "$CONFIG_FILE"
     
     allow_port "$STLS_PORT"
-    systemctl daemon-reload
-    systemctl enable ss-rust shadowtls >/dev/null 2>&1
+    systemctl daemon-reload; systemctl enable ss-rust shadowtls >/dev/null 2>&1
     systemctl restart ss-rust shadowtls
     
-    echo -e "${INFO} 服务启动中..."
+    echo -e "${INFO} 启动中..."
     sleep 3
-    if systemctl is-active --quiet shadowtls; then show_conf; else echo -e "${ERROR} 启动失败，请检查日志"; fi
+    if systemctl is-active --quiet shadowtls; then show_conf; else echo -e "${ERROR} 启动失败"; fi
 }
 
 show_conf() {
@@ -283,15 +204,35 @@ show_conf() {
     local link="ss://${ui}@${ip}:${SS_PORT}?shadow-tls=${sb}#STLS-${DOMAIN}"
     
     clear
-    echo -e "${Green} === 节点配置 === ${RESET}"
-    echo -e "IP: ${ip}  端口: ${STLS_PORT}"
+    echo -e "${Green} === 配置信息 === ${RESET}"
+    echo -e "IP: ${ip}"
+    echo -e "端口: ${STLS_PORT} (ShadowTLS)"
     echo -e "密码: ${PASSWORD}"
     echo -e "加密: ${METHOD}"
     echo -e "域名: ${DOMAIN}"
-    echo -e "\n${Yellow}通用链接:${RESET} ${link}"
-    echo -e "\n${Yellow}Clash Meta:${RESET}"
-    echo -e "  - name: STLS-${DOMAIN}\n    type: ss\n    server: ${ip}\n    port: ${STLS_PORT}\n    password: \"${PASSWORD}\"\n    cipher: ${METHOD}\n    plugin: shadow-tls\n    client-fingerprint: chrome\n    plugin-opts:\n      host: \"${DOMAIN}\"\n      password: \"${PASSWORD}\"\n      version: 3"
-    echo ""; read -n 1 -s -r -p "按键返回..."
+    
+    echo -e "\n${Yellow}>> 通用链接 (Shadowrocket / Nekobox)${RESET}"
+    echo -e "${link}"
+    
+    echo -e "\n${Yellow}>> Mihomo / Clash Meta 配置块${RESET}"
+    # 修复：使用 cat 输出标准 YAML 块，保证缩进正确
+    cat <<EOF
+proxies:
+  - name: "STLS-${DOMAIN}"
+    type: ss
+    server: ${ip}
+    port: ${STLS_PORT}
+    password: "${PASSWORD}"
+    cipher: ${METHOD}
+    plugin: shadow-tls
+    client-fingerprint: chrome
+    plugin-opts:
+      host: "${DOMAIN}"
+      password: "${PASSWORD}"
+      version: 3
+    udp: true
+EOF
+    echo ""; read -n 1 -s -r -p "按任意键返回..."
 }
 
 uninstall() {
@@ -305,7 +246,7 @@ uninstall() {
 menu() {
     while true; do
         clear
-        echo -e "${Cyan}ShadowTLS-Menu v4.9${RESET}"
+        echo -e "${Cyan}ShadowTLS-Menu v4.10${RESET}"
         if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; echo -e "状态: $(systemctl is-active --quiet shadowtls && echo "${Green}运行${RESET}" || echo "${Red}停止${RESET}") | 端口: $STLS_PORT"; else echo "状态: 未安装"; fi
         echo "------------------------"
         echo "1. 安装 / 重置"
@@ -319,8 +260,8 @@ menu() {
     done
 }
 
-# --- 执行入口 ---
+# --- 入口 ---
 check_root
-install_base_deps  # 必须最优先执行！解决 xz 问题
-install_global "$@" # 必须第二执行！解决自动更新和交互问题
+install_base_deps
+install_global "$@"
 menu
