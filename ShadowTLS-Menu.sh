@@ -1,9 +1,9 @@
 #!/bin/bash
 # ====================================================
-# 作者: jinqians (v4.10 Mihomo-Fix)
+# 作者: jinqians (v4.12 Default-SNI-Update)
 # 仓库: https://github.com/connerhsu/ShadowTLS-Menu
 # 描述: SS-Rust + ShadowTLS 一键管理
-# 修复: Mihomo/Clash Meta 配置格式缩进错误
+# 更新: 默认伪装域名更改为 aod.itunes.apple.com
 # ====================================================
 
 # --- 配置 ---
@@ -29,7 +29,7 @@ WARN="${Yellow}[警告]${RESET}"
 check_root() { [[ $EUID -ne 0 ]] && echo -e "${ERROR} 请使用 sudo 或 root 运行" && exit 1; }
 
 install_base_deps() {
-    local common_deps=("wget" "curl" "openssl" "tar" "lsof" "grep" "sed")
+    local common_deps=("wget" "curl" "openssl" "tar" "lsof" "grep" "sed" "awk" "ps")
     local pkg_mgr=""
     local xz_pkg=""
     
@@ -54,7 +54,6 @@ install_base_deps() {
 # --- 1. 自安装逻辑 ---
 install_global() {
     if [[ "$0" != "$INSTALL_PATH" ]]; then
-        # 强制下载覆盖 (update)
         if command -v wget >/dev/null; then wget -qO "$INSTALL_PATH" "$REPO_URL"; else curl -sSL -o "$INSTALL_PATH" "$REPO_URL"; fi
         if [[ ! -s "$INSTALL_PATH" ]]; then echo -e "${ERROR} 脚本下载失败！"; exit 1; fi
         chmod +x "$INSTALL_PATH"
@@ -101,6 +100,19 @@ download_bin() {
     if [[ ! -s "$out" ]]; then echo -e "${ERROR} $name 下载失败"; return 1; fi
     chmod +x "$out"
     return 0
+}
+
+# --- 内存计算函数 ---
+calc_mem() {
+    local pid=$1
+    if [[ -n "$pid" && "$pid" != "0" ]]; then
+        local mem_kb=$(ps -o rss= -p "$pid" 2>/dev/null | awk '{sum+=$1} END {print sum}')
+        if [[ -n "$mem_kb" && "$mem_kb" -gt 0 ]]; then
+            awk "BEGIN {printf \"%.2f MB\", $mem_kb/1024}"
+            return
+        fi
+    fi
+    echo "0.00 MB"
 }
 
 # --- 3. 安装流程 ---
@@ -166,7 +178,8 @@ install_all() {
         if [[ "$p" == "$STLS_PORT" ]]; then echo -e "${ERROR} 冲突"; else SS_PORT=$p; break; fi
     done
     
-    read -rp "3. 伪装域名 (默认 player.live-video.net): " d; DOMAIN=${d:-player.live-video.net}
+    # 修改处：默认伪装域名更改为 aod.itunes.apple.com
+    read -rp "3. 伪装域名 (默认 aod.itunes.apple.com): " d; DOMAIN=${d:-aod.itunes.apple.com}
     
     echo "4. 加密方式 (推荐 SS-2022)"
     echo "   1. 2022-blake3-aes-256-gcm"; echo "   2. 2022-blake3-aes-128-gcm"; echo "   3. 2022-blake3-chacha20-poly1305"
@@ -215,7 +228,6 @@ show_conf() {
     echo -e "${link}"
     
     echo -e "\n${Yellow}>> Mihomo / Clash Meta 配置块${RESET}"
-    # 修复：使用 cat 输出标准 YAML 块，保证缩进正确
     cat <<EOF
 proxies:
   - name: "STLS-${DOMAIN}"
@@ -246,17 +258,64 @@ uninstall() {
 menu() {
     while true; do
         clear
-        echo -e "${Cyan}ShadowTLS-Menu v4.10${RESET}"
-        if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; echo -e "状态: $(systemctl is-active --quiet shadowtls && echo "${Green}运行${RESET}" || echo "${Red}停止${RESET}") | 端口: $STLS_PORT"; else echo "状态: 未安装"; fi
-        echo "------------------------"
-        echo "1. 安装 / 重置"
-        echo "2. 查看链接"
-        echo "3. 重启服务"
-        echo "4. 停止服务"
-        echo "5. 卸载"
-        echo "0. 退出"
-        read -rp "选择: " n
-        case $n in 1) install_all;; 2) show_conf;; 3) systemctl restart ss-rust shadowtls && sleep 1;; 4) systemctl stop ss-rust shadowtls;; 5) uninstall;; 0) exit 0;; *) ;; esac
+        echo -e "${Cyan}====================================================${RESET}"
+        echo -e "${Cyan}       ShadowTLS-Menu v4.12 (仪表盘增强版)          ${RESET}"
+        echo -e "${Cyan}====================================================${RESET}"
+        
+        if [[ -f "$CONFIG_FILE" ]]; then 
+            source "$CONFIG_FILE"
+            
+            # 检测进程状态和PID
+            local stls_pid=$(systemctl show -p MainPID shadowtls.service 2>/dev/null | cut -d= -f2)
+            local ss_pid=$(systemctl show -p MainPID ss-rust.service 2>/dev/null | cut -d= -f2)
+            
+            local stls_status="${Red}● 已停止${RESET}"
+            local ss_status="${Red}● 已停止${RESET}"
+            local stls_mem="0.00 MB"
+            local ss_mem="0.00 MB"
+
+            # 计算运行状态和内存
+            if systemctl is-active --quiet shadowtls; then 
+                stls_status="${Green}● 运行中${RESET}"
+                stls_mem=$(calc_mem "$stls_pid")
+            fi
+            
+            if systemctl is-active --quiet ss-rust; then 
+                ss_status="${Green}● 运行中${RESET}"
+                ss_mem=$(calc_mem "$ss_pid")
+            fi
+
+            echo -e " 【服务状态】"
+            echo -e "   ShadowTLS : $stls_status    |  内存占用: ${Yellow}$stls_mem${RESET}"
+            echo -e "   SS-Rust   : $ss_status    |  内存占用: ${Yellow}$ss_mem${RESET}"
+            echo -e " ---------------------------------------------------"
+            echo -e " 【节点配置】"
+            echo -e "   加密协议  : ${Green}${METHOD}${RESET}"
+            echo -e "   公网端口  : ${Green}${STLS_PORT}${RESET} (外部)"
+            echo -e "   内部端口  : ${Yellow}${SS_PORT}${RESET} (SS-Rust)"
+            echo -e "   伪装域名  : ${Green}${DOMAIN}${RESET}"
+        else 
+            echo -e " 状态: ${Red}未安装${RESET}，请先执行 [ 1. 安装 / 重置 ]"
+        fi
+        
+        echo -e "${Cyan}====================================================${RESET}"
+        echo " 1. 安装 / 重置"
+        echo " 2. 查看链接 / 节点配置"
+        echo " 3. 重启服务"
+        echo " 4. 停止服务"
+        echo " 5. 完全卸载"
+        echo " 0. 退出"
+        echo -e "----------------------------------------------------"
+        read -rp " 请选择操作 [0-5]: " n
+        case $n in 
+            1) install_all;; 
+            2) show_conf;; 
+            3) systemctl restart ss-rust shadowtls && echo -e "${INFO} 已重启" && sleep 1;; 
+            4) systemctl stop ss-rust shadowtls && echo -e "${INFO} 已停止" && sleep 1;; 
+            5) uninstall; sleep 1;; 
+            0) exit 0;; 
+            *) ;; 
+        esac
     done
 }
 
