@@ -3,7 +3,6 @@
 # 作者: jinqians (v4.12 Default-SNI-Update)
 # 仓库: https://github.com/connerhsu/ShadowTLS-Menu
 # 描述: SS-Rust + ShadowTLS 一键管理
-# 更新: 默认伪装域名更改为 aod.itunes.apple.com
 # ====================================================
 
 # --- 配置 ---
@@ -178,8 +177,8 @@ install_all() {
         if [[ "$p" == "$STLS_PORT" ]]; then echo -e "${ERROR} 冲突"; else SS_PORT=$p; break; fi
     done
     
-    # 修改处：默认伪装域名更改为 aod.itunes.apple.com
-    read -rp "3. 伪装域名 (默认 aod.itunes.apple.com): " d; DOMAIN=${d:-aod.itunes.apple.com}
+    # 修改处：默认伪装域名更改为 mensura.cdn-apple.com
+    read -rp "3. 伪装域名 (默认 mensura.cdn-apple.com): " d; DOMAIN=${d:-mensura.cdn-apple.com}
     
     echo "4. 加密方式 (推荐 SS-2022)"
     echo "   1. 2022-blake3-aes-256-gcm"; echo "   2. 2022-blake3-aes-128-gcm"; echo "   3. 2022-blake3-chacha20-poly1305"
