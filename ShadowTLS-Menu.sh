@@ -1,8 +1,7 @@
 #!/bin/bash
 # ====================================================
 # 作者: jinqians (v4.12 Default-SNI-Update)
-# 仓库: https://github.com/connerhsu/ShadowTLS-Menu
-# 描述: SS-Rust + ShadowTLS 一键管理
+# 描述: SS-Rust + ShadowTLS + BBR 自动加速
 # ====================================================
 
 # --- 配置 ---
@@ -24,8 +23,20 @@ INFO="${Green}[信息]${RESET}"
 ERROR="${Red}[错误]${RESET}"
 WARN="${Yellow}[警告]${RESET}"
 
-# --- 0. 基础环境检查 ---
+# --- 0. 环境与优化 ---
 check_root() { [[ $EUID -ne 0 ]] && echo -e "${ERROR} 请使用 sudo 或 root 运行" && exit 1; }
+
+enable_bbr() {
+    if ! sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
+        echo -e "${INFO} 正在开启 BBR 加速..."
+        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+        sysctl -p >/dev/null 2>&1
+        echo -e "${INFO} BBR 加速已激活"
+    else
+        echo -e "${INFO} BBR 加速已是在运行状态"
+    fi
+}
 
 install_base_deps() {
     local common_deps=("wget" "curl" "openssl" "tar" "lsof" "grep" "sed" "awk" "ps")
@@ -46,7 +57,7 @@ install_base_deps() {
         if [[ "$pkg_mgr" == "apt-get" ]]; then $pkg_mgr update -y >/dev/null && $pkg_mgr install -y "${missing[@]}";
         elif [[ "$pkg_mgr" == "apk" ]]; then $pkg_mgr add "${missing[@]}";
         elif [[ -n "$pkg_mgr" ]]; then $pkg_mgr install -y "${missing[@]}";
-        else echo -e "${ERROR} 无法自动安装依赖，请手动安装: ${missing[*]}"; exit 1; fi
+        else echo -e "${ERROR} 无法自动安装依赖"; exit 1; fi
     fi
 }
 
@@ -73,7 +84,6 @@ get_arch() {
 get_public_ip() {
     local ip=$(curl -s4 -m 3 http://api.ip.sb/ip)
     [[ -z "$ip" ]] && ip=$(curl -s4 -m 3 http://ipinfo.io/ip)
-    [[ -z "$ip" ]] && ip=$(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+' | head -n 1)
     echo "$ip"
 }
 
@@ -96,12 +106,11 @@ download_bin() {
     rm -f "$out"
     echo -e "${INFO} 下载 $name..."
     if command -v wget >/dev/null; then wget -qO "$out" "$url"; else curl -sSL -o "$out" "$url"; fi
-    if [[ ! -s "$out" ]]; then echo -e "${ERROR} $name 下载失败"; return 1; fi
+    [[ ! -s "$out" ]] && return 1
     chmod +x "$out"
     return 0
 }
 
-# --- 内存计算函数 ---
 calc_mem() {
     local pid=$1
     if [[ -n "$pid" && "$pid" != "0" ]]; then
@@ -118,7 +127,6 @@ calc_mem() {
 install_ss() {
     get_arch
     local v=$(get_ver "shadowsocks/shadowsocks-rust"); [[ -z "$v" ]] && v="v1.18.2"
-    echo -e "${INFO} SS-Rust 版本: $v"
     download_bin "https://github.com/shadowsocks/shadowsocks-rust/releases/download/${v}/shadowsocks-${v}.${SS_ARCH}.tar.xz" "/tmp/ss.tar.xz" "SS-Rust" || return 1
     tar -xJf /tmp/ss.tar.xz -C /usr/local/bin/ ssserver
     chmod +x "$SS_RUST_BIN"; rm -f /tmp/ss.tar.xz
@@ -144,10 +152,8 @@ EOF
 install_stls() {
     get_arch
     local v=$(get_ver "ihciah/shadow-tls"); [[ -z "$v" ]] && v="v3.3.5"
-    echo -e "${INFO} ShadowTLS 版本: $v"
     download_bin "https://github.com/ihciah/shadow-tls/releases/download/${v}/shadow-tls-${ST_ARCH}" "$STLS_BIN" "ShadowTLS" || return 1
-    if ! "$STLS_BIN" --version >/dev/null 2>&1; then echo -e "${ERROR} 校验失败"; return 1; fi
-
+    
     cat > /etc/systemd/system/shadowtls.service <<EOF
 [Unit]
 Description=ShadowTLS
@@ -156,7 +162,6 @@ Requires=ss-rust.service
 [Service]
 Type=simple
 Environment=MONOIO_FORCE_LEGACY_DRIVER=1
-ExecStartPre=/bin/sh -c "ulimit -n 51200"
 ExecStart=${STLS_BIN} --v3 --strict server --listen 0.0.0.0:${STLS_PORT} --server 127.0.0.1:${SS_PORT} --tls ${DOMAIN}:443 --password ${PASSWORD}
 Restart=always
 LimitNOFILE=51200
@@ -166,6 +171,7 @@ EOF
 }
 
 install_all() {
+    enable_bbr
     echo -e "\n${Cyan}=== 配置向导 ===${RESET}"
     
     read -rp "1. ShadowTLS 公网端口 (默认 8443): " p; STLS_PORT=${p:-8443}
@@ -174,15 +180,14 @@ install_all() {
     while true; do
         read -rp "2. SS-Rust 内部端口 (默认随机): " p
         if [[ -z "$p" ]]; then SS_PORT=$(shuf -i 20000-60000 -n 1); echo -e "${INFO} 随机端口: ${Green}$SS_PORT${RESET}"; break; fi
-        if [[ "$p" == "$STLS_PORT" ]]; then echo -e "${ERROR} 冲突"; else SS_PORT=$p; break; fi
+        [[ "$p" == "$STLS_PORT" ]] && echo -e "${ERROR} 冲突" || { SS_PORT=$p; break; }
     done
     
-    # 修改处：默认伪装域名更改为 www.cisco.com
     read -rp "3. 伪装域名 (默认 www.cisco.com): " d; DOMAIN=${d:-www.cisco.com}
     
     echo "4. 加密方式 (推荐 SS-2022)"
-    echo "   1. 2022-blake3-aes-256-gcm"; echo "   2. 2022-blake3-aes-128-gcm"; echo "   3. 2022-blake3-chacha20-poly1305"
-    read -rp "   选择 [1-3] (默认 1): " m; m=${m:-1}
+    echo "   1. 2022-blake3-aes-256-gcm (默认)"; echo "   2. 2022-blake3-aes-128-gcm"; echo "   3. 2022-blake3-chacha20-poly1305"
+    read -rp "   选择 [1-3]: " m; m=${m:-1}
     case $m in
         2) METHOD="2022-blake3-aes-128-gcm"; KEY=16 ;;
         3) METHOD="2022-blake3-chacha20-poly1305"; KEY=32 ;;
@@ -190,10 +195,8 @@ install_all() {
     esac
     PASSWORD=$(openssl rand -base64 $KEY)
     
-    echo -e "${INFO} 开始安装..."
     install_ss || return; install_stls || return
     
-    mkdir -p "$CONFIG_DIR"
     echo "STLS_PORT=$STLS_PORT" > "$CONFIG_FILE"; echo "SS_PORT=$SS_PORT" >> "$CONFIG_FILE"
     echo "PASSWORD=$PASSWORD" >> "$CONFIG_FILE"; echo "METHOD=$METHOD" >> "$CONFIG_FILE"; echo "DOMAIN=$DOMAIN" >> "$CONFIG_FILE"
     
@@ -201,9 +204,8 @@ install_all() {
     systemctl daemon-reload; systemctl enable ss-rust shadowtls >/dev/null 2>&1
     systemctl restart ss-rust shadowtls
     
-    echo -e "${INFO} 启动中..."
-    sleep 3
-    if systemctl is-active --quiet shadowtls; then show_conf; else echo -e "${ERROR} 启动失败"; fi
+    sleep 2
+    show_conf
 }
 
 show_conf() {
@@ -213,18 +215,22 @@ show_conf() {
     local sj="{\"version\":\"3\",\"password\":\"${PASSWORD}\",\"host\":\"${DOMAIN}\",\"port\":\"${STLS_PORT}\",\"address\":\"${ip}\"}"
     local sb=$(echo -n "$sj" | base64 -w 0 | tr -d '\n' | sed 's/+/-/g; s/\//_/g; s/=//g')
     local ui=$(echo -n "${METHOD}:${PASSWORD}" | base64 -w 0 | tr -d '\n' | sed 's/+/-/g; s/\//_/g; s/=//g')
-    local link="ss://${ui}@${ip}:${SS_PORT}?shadow-tls=${sb}#STLS-${DOMAIN}"
+    
+    local stls_link="ss://${ui}@${ip}:${STLS_PORT}?shadow-tls=${sb}#STLS-${DOMAIN}"
+    local ss_only="ss://${ui}@${ip}:${SS_PORT}#SS-Only-${DOMAIN}"
     
     clear
     echo -e "${Green} === 配置信息 === ${RESET}"
-    echo -e "IP: ${ip}"
-    echo -e "端口: ${STLS_PORT} (ShadowTLS)"
-    echo -e "密码: ${PASSWORD}"
-    echo -e "加密: ${METHOD}"
-    echo -e "域名: ${DOMAIN}"
+    echo -e "IP      : ${ip}"
+    echo -e "TLS 域名 : ${DOMAIN}"
+    echo -e "共享密码 : ${PASSWORD}"
+    echo -e "加密方式 : ${METHOD}"
     
-    echo -e "\n${Yellow}>> 通用链接 (Shadowrocket / Nekobox)${RESET}"
-    echo -e "${link}"
+    echo -e "\n${Cyan} >> ShadowTLS 混合链接 (Shadowrocket/Nekobox) << ${RESET}"
+    echo -e "${stls_link}"
+    
+    echo -e "\n${Cyan} >> 原始 SS-2022 链接 (直连测试用) << ${RESET}"
+    echo -e "${ss_only}"
     
     echo -e "\n${Yellow}>> Mihomo / Clash Meta 配置块${RESET}"
     cat <<EOF
@@ -249,7 +255,7 @@ EOF
 uninstall() {
     systemctl stop ss-rust shadowtls; systemctl disable ss-rust shadowtls
     rm -f /etc/systemd/system/ss-rust.service /etc/systemd/system/shadowtls.service
-    rm -f "$SS_RUST_BIN" "$STLS_BIN" /usr/local/bin/menu /usr/local/bin/menu.sh
+    rm -f "$SS_RUST_BIN" "$STLS_BIN" "$BIN_LINK" "$INSTALL_PATH"
     rm -rf "$CONFIG_DIR"; systemctl daemon-reload
     echo -e "${INFO} 已卸载"
 }
@@ -258,54 +264,33 @@ menu() {
     while true; do
         clear
         echo -e "${Cyan}====================================================${RESET}"
-        echo -e "${Cyan}       ShadowTLS-Menu v4.12 (仪表盘增强版)          ${RESET}"
+        echo -e "${Cyan}       ShadowTLS-Menu v4.12 (BBR+双链接版)          ${RESET}"
         echo -e "${Cyan}====================================================${RESET}"
         
         if [[ -f "$CONFIG_FILE" ]]; then 
             source "$CONFIG_FILE"
-            
-            # 检测进程状态和PID
             local stls_pid=$(systemctl show -p MainPID shadowtls.service 2>/dev/null | cut -d= -f2)
             local ss_pid=$(systemctl show -p MainPID ss-rust.service 2>/dev/null | cut -d= -f2)
-            
             local stls_status="${Red}● 已停止${RESET}"
             local ss_status="${Red}● 已停止${RESET}"
-            local stls_mem="0.00 MB"
-            local ss_mem="0.00 MB"
 
-            # 计算运行状态和内存
-            if systemctl is-active --quiet shadowtls; then 
-                stls_status="${Green}● 运行中${RESET}"
-                stls_mem=$(calc_mem "$stls_pid")
-            fi
-            
-            if systemctl is-active --quiet ss-rust; then 
-                ss_status="${Green}● 运行中${RESET}"
-                ss_mem=$(calc_mem "$ss_pid")
-            fi
+            if systemctl is-active --quiet shadowtls; then stls_status="${Green}● 运行中${RESET}"; fi
+            if systemctl is-active --quiet ss-rust; then ss_status="${Green}● 运行中${RESET}"; fi
 
-            echo -e " 【服务状态】"
-            echo -e "   ShadowTLS : $stls_status    |  内存占用: ${Yellow}$stls_mem${RESET}"
-            echo -e "   SS-Rust   : $ss_status    |  内存占用: ${Yellow}$ss_mem${RESET}"
-            echo -e " ---------------------------------------------------"
-            echo -e " 【节点配置】"
-            echo -e "   加密协议  : ${Green}${METHOD}${RESET}"
-            echo -e "   公网端口  : ${Green}${STLS_PORT}${RESET} (外部)"
-            echo -e "   内部端口  : ${Yellow}${SS_PORT}${RESET} (SS-Rust)"
-            echo -e "   伪装域名  : ${Green}${DOMAIN}${RESET}"
+            echo -e " ShadowTLS : $stls_status | SS-Rust : $ss_status"
+            echo -e " 公网端口  : ${Green}${STLS_PORT}${RESET} | 域名: ${Green}${DOMAIN}${RESET}"
         else 
-            echo -e " 状态: ${Red}未安装${RESET}，请先执行 [ 1. 安装 / 重置 ]"
+            echo -e " 状态: ${Red}未安装${RESET}"
         fi
         
         echo -e "${Cyan}====================================================${RESET}"
-        echo " 1. 安装 / 重置"
-        echo " 2. 查看链接 / 节点配置"
+        echo " 1. 安装 / 重置 (自动开启 BBR)"
+        echo " 2. 查看链接 (含 ShadowTLS 和 原始 SS)"
         echo " 3. 重启服务"
         echo " 4. 停止服务"
         echo " 5. 完全卸载"
         echo " 0. 退出"
-        echo -e "----------------------------------------------------"
-        read -rp " 请选择操作 [0-5]: " n
+        read -rp " 请选择 [0-5]: " n
         case $n in 
             1) install_all;; 
             2) show_conf;; 
@@ -313,13 +298,10 @@ menu() {
             4) systemctl stop ss-rust shadowtls && echo -e "${INFO} 已停止" && sleep 1;; 
             5) uninstall; sleep 1;; 
             0) exit 0;; 
-            *) ;; 
         esac
     done
 }
 
-# --- 入口 ---
 check_root
 install_base_deps
-install_global "$@"
 menu
