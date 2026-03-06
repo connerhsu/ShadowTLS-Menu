@@ -177,8 +177,8 @@ install_all() {
         if [[ "$p" == "$STLS_PORT" ]]; then echo -e "${ERROR} 冲突"; else SS_PORT=$p; break; fi
     done
     
-    # 修改处：默认伪装域名更改为 mensura.cdn-apple.com
-    read -rp "3. 伪装域名 (默认 mensura.cdn-apple.com): " d; DOMAIN=${d:-mensura.cdn-apple.com}
+    # 修改处：默认伪装域名更改为 www.cisco.com
+    read -rp "3. 伪装域名 (默认 www.cisco.com): " d; DOMAIN=${d:-www.cisco.com}
     
     echo "4. 加密方式 (推荐 SS-2022)"
     echo "   1. 2022-blake3-aes-256-gcm"; echo "   2. 2022-blake3-aes-128-gcm"; echo "   3. 2022-blake3-chacha20-poly1305"
