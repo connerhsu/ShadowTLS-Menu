@@ -5,6 +5,7 @@
 # ====================================================
 
 # --- 配置 ---
+# 修正了 REPO_URL 为正确的 ShadowTLS.sh
 REPO_URL="https://raw.githubusercontent.com/connerhsu/ShadowTLS-Menu/main/ShadowTLS.sh"
 INSTALL_PATH="/usr/local/bin/menu.sh"
 BIN_LINK="/usr/local/bin/menu"
@@ -64,7 +65,8 @@ install_global() {
         wget -qO "$temp_file" "$REPO_URL"
     fi
     
-    if [[ -s "$temp_file" ]]; then
+    # 增加安全拦截：确保下载的是有效的 bash 脚本（包含 #!/bin/bash 且不为空），防止 404 网页破坏本地文件
+    if [[ -s "$temp_file" ]] && grep -q "#!/bin/bash" "$temp_file"; then
         mkdir -p "$(dirname "$INSTALL_PATH")"
         mv -f "$temp_file" "$INSTALL_PATH"
         chmod +x "$INSTALL_PATH"
@@ -74,7 +76,8 @@ install_global() {
         # 重新执行最新脚本，加上 --updated 防止无限循环
         exec bash "$INSTALL_PATH" --updated "$@" < /dev/tty
     else
-        echo -e "${ERROR} 同步最新版本失败，将继续使用当前版本。"
+        echo -e "${ERROR} 同步最新版本失败（获取到了无效的内容或404），将继续尝试使用本地当前版本。"
+        rm -f "$temp_file"
         # 如果下载失败，但当前没有安装，也尝试注册全局命令
         if [[ ! -f "$INSTALL_PATH" ]]; then
             cp "$0" "$INSTALL_PATH" 2>/dev/null
@@ -194,7 +197,7 @@ install_all() {
         [[ "$p" == "$STLS_PORT" ]] && echo -e "${ERROR} 冲突" || { SS_PORT=$p; break; }
     done
     
-    read -rp "3. 伪装域名 (默认 assets.adobe.com): " d; DOMAIN=${d:-assets.adobe.com}
+    read -rp "3. 伪装域名 (默认 www.cisco.com): " d; DOMAIN=${d:-www.cisco.com}
     
     echo "4. 加密方式 (推荐 SS-2022)"
     echo "   1. 2022-blake3-aes-256-gcm (默认)"; echo "   2. 2022-blake3-aes-128-gcm"; echo "   3. 2022-blake3-chacha20-poly1305"
