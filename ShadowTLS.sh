@@ -5,7 +5,7 @@
 # ====================================================
 
 # --- 配置 ---
-REPO_URL="https://raw.githubusercontent.com/connerhsu/ShadowTLS-Menu/main/ShadowTLS-Menu.sh"
+REPO_URL="https://raw.githubusercontent.com/connerhsu/ShadowTLS-Menu/main/ShadowTLS.sh"
 INSTALL_PATH="/usr/local/bin/menu.sh"
 BIN_LINK="/usr/local/bin/menu"
 
