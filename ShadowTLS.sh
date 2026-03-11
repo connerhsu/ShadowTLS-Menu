@@ -1,7 +1,7 @@
 #!/bin/bash
 # ====================================================
 # 作者: jinqians (v4.12 Default-SNI-Update)
-# 描述: SS-Rust + ShadowTLS + BBR 自动加速
+# 描述: SS-Rust + ShadowTLS 自动加速 (移除自动BBR，增加内存显示与强制同步)
 # ====================================================
 
 # --- 配置 ---
@@ -26,18 +26,6 @@ WARN="${Yellow}[警告]${RESET}"
 # --- 0. 环境与优化 ---
 check_root() { [[ $EUID -ne 0 ]] && echo -e "${ERROR} 请使用 sudo 或 root 运行" && exit 1; }
 
-enable_bbr() {
-    if ! sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
-        echo -e "${INFO} 正在开启 BBR 加速..."
-        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-        sysctl -p >/dev/null 2>&1
-        echo -e "${INFO} BBR 加速已激活"
-    else
-        echo -e "${INFO} BBR 加速已是在运行状态"
-    fi
-}
-
 install_base_deps() {
     local common_deps=("wget" "curl" "openssl" "tar" "lsof" "grep" "sed" "awk" "ps")
     local pkg_mgr=""
@@ -61,14 +49,38 @@ install_base_deps() {
     fi
 }
 
-# --- 1. 自安装逻辑 ---
+# --- 1. 自安装与强制更新逻辑 ---
 install_global() {
-    if [[ "$0" != "$INSTALL_PATH" ]]; then
-        if command -v wget >/dev/null; then wget -qO "$INSTALL_PATH" "$REPO_URL"; else curl -sSL -o "$INSTALL_PATH" "$REPO_URL"; fi
-        if [[ ! -s "$INSTALL_PATH" ]]; then echo -e "${ERROR} 脚本下载失败！"; exit 1; fi
+    # 如果带有 --updated 参数，说明已经是最新拉取的版本，跳过更新环节防止死循环
+    if [[ "$1" == "--updated" ]]; then
+        return
+    fi
+    
+    echo -e "${INFO} 正在从 GitHub 强制同步最新版本..."
+    local temp_file="/tmp/shadowtls_menu.sh"
+    if command -v curl >/dev/null; then 
+        curl -sSL -o "$temp_file" "$REPO_URL"
+    else 
+        wget -qO "$temp_file" "$REPO_URL"
+    fi
+    
+    if [[ -s "$temp_file" ]]; then
+        mkdir -p "$(dirname "$INSTALL_PATH")"
+        mv -f "$temp_file" "$INSTALL_PATH"
         chmod +x "$INSTALL_PATH"
+        # 创建 menu 命令软链接，实现全局任意位置唤醒
         ln -sf "$INSTALL_PATH" "$BIN_LINK"
-        exec bash "$INSTALL_PATH" "$@" < /dev/tty
+        
+        # 重新执行最新脚本，加上 --updated 防止无限循环
+        exec bash "$INSTALL_PATH" --updated "$@" < /dev/tty
+    else
+        echo -e "${ERROR} 同步最新版本失败，将继续使用当前版本。"
+        # 如果下载失败，但当前没有安装，也尝试注册全局命令
+        if [[ ! -f "$INSTALL_PATH" ]]; then
+            cp "$0" "$INSTALL_PATH" 2>/dev/null
+            chmod +x "$INSTALL_PATH" 2>/dev/null
+            ln -sf "$INSTALL_PATH" "$BIN_LINK" 2>/dev/null
+        fi
     fi
 }
 
@@ -171,7 +183,6 @@ EOF
 }
 
 install_all() {
-    enable_bbr
     echo -e "\n${Cyan}=== 配置向导 ===${RESET}"
     
     read -rp "1. ShadowTLS 公网端口 (默认 8443): " p; STLS_PORT=${p:-8443}
@@ -183,7 +194,7 @@ install_all() {
         [[ "$p" == "$STLS_PORT" ]] && echo -e "${ERROR} 冲突" || { SS_PORT=$p; break; }
     done
     
-    read -rp "3. 伪装域名 (默认 www.cisco.com): " d; DOMAIN=${d:-www.cisco.com}
+    read -rp "3. 伪装域名 (默认 assets.adobe.com): " d; DOMAIN=${d:-assets.adobe.com}
     
     echo "4. 加密方式 (推荐 SS-2022)"
     echo "   1. 2022-blake3-aes-256-gcm (默认)"; echo "   2. 2022-blake3-aes-128-gcm"; echo "   3. 2022-blake3-chacha20-poly1305"
@@ -264,7 +275,7 @@ menu() {
     while true; do
         clear
         echo -e "${Cyan}====================================================${RESET}"
-        echo -e "${Cyan}       ShadowTLS-Menu v4.12 (BBR+双链接版)          ${RESET}"
+        echo -e "${Cyan}       ShadowTLS-Menu v4.12 (双链接版)              ${RESET}"
         echo -e "${Cyan}====================================================${RESET}"
         
         if [[ -f "$CONFIG_FILE" ]]; then 
@@ -273,18 +284,26 @@ menu() {
             local ss_pid=$(systemctl show -p MainPID ss-rust.service 2>/dev/null | cut -d= -f2)
             local stls_status="${Red}● 已停止${RESET}"
             local ss_status="${Red}● 已停止${RESET}"
+            local stls_mem="0.00 MB"
+            local ss_mem="0.00 MB"
 
-            if systemctl is-active --quiet shadowtls; then stls_status="${Green}● 运行中${RESET}"; fi
-            if systemctl is-active --quiet ss-rust; then ss_status="${Green}● 运行中${RESET}"; fi
+            if systemctl is-active --quiet shadowtls; then 
+                stls_status="${Green}● 运行中${RESET}"
+                stls_mem=$(calc_mem "$stls_pid")
+            fi
+            if systemctl is-active --quiet ss-rust; then 
+                ss_status="${Green}● 运行中${RESET}"
+                ss_mem=$(calc_mem "$ss_pid")
+            fi
 
-            echo -e " ShadowTLS : $stls_status | SS-Rust : $ss_status"
+            echo -e " ShadowTLS : $stls_status (内存: $stls_mem) | SS-Rust : $ss_status (内存: $ss_mem)"
             echo -e " 公网端口  : ${Green}${STLS_PORT}${RESET} | 域名: ${Green}${DOMAIN}${RESET}"
         else 
             echo -e " 状态: ${Red}未安装${RESET}"
         fi
         
         echo -e "${Cyan}====================================================${RESET}"
-        echo " 1. 安装 / 重置 (自动开启 BBR)"
+        echo " 1. 安装 / 重置"
         echo " 2. 查看链接 (含 ShadowTLS 和 原始 SS)"
         echo " 3. 重启服务"
         echo " 4. 停止服务"
@@ -304,4 +323,5 @@ menu() {
 
 check_root
 install_base_deps
+install_global "$@"
 menu
