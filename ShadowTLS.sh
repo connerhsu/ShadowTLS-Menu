@@ -5,7 +5,7 @@
 # ====================================================
 
 # --- 配置 ---
-# 修正了 REPO_URL 为正确的 ShadowTLS.sh
+# 这里已经修复为正确的 GitHub 链接
 REPO_URL="https://raw.githubusercontent.com/connerhsu/ShadowTLS-Menu/main/ShadowTLS.sh"
 INSTALL_PATH="/usr/local/bin/menu.sh"
 BIN_LINK="/usr/local/bin/menu"
@@ -52,7 +52,6 @@ install_base_deps() {
 
 # --- 1. 自安装与强制更新逻辑 ---
 install_global() {
-    # 如果带有 --updated 参数，说明已经是最新拉取的版本，跳过更新环节防止死循环
     if [[ "$1" == "--updated" ]]; then
         return
     fi
@@ -65,20 +64,16 @@ install_global() {
         wget -qO "$temp_file" "$REPO_URL"
     fi
     
-    # 增加安全拦截：确保下载的是有效的 bash 脚本（包含 #!/bin/bash 且不为空），防止 404 网页破坏本地文件
+    # 增加双重安全拦截：确保下载的是有效的 bash 脚本，防止被 404 网页覆盖
     if [[ -s "$temp_file" ]] && grep -q "#!/bin/bash" "$temp_file"; then
         mkdir -p "$(dirname "$INSTALL_PATH")"
         mv -f "$temp_file" "$INSTALL_PATH"
         chmod +x "$INSTALL_PATH"
-        # 创建 menu 命令软链接，实现全局任意位置唤醒
         ln -sf "$INSTALL_PATH" "$BIN_LINK"
-        
-        # 重新执行最新脚本，加上 --updated 防止无限循环
         exec bash "$INSTALL_PATH" --updated "$@" < /dev/tty
     else
         echo -e "${ERROR} 同步最新版本失败（获取到了无效的内容或404），将继续尝试使用本地当前版本。"
         rm -f "$temp_file"
-        # 如果下载失败，但当前没有安装，也尝试注册全局命令
         if [[ ! -f "$INSTALL_PATH" ]]; then
             cp "$0" "$INSTALL_PATH" 2>/dev/null
             chmod +x "$INSTALL_PATH" 2>/dev/null
