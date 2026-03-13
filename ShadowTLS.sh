@@ -194,13 +194,13 @@ install_all() {
     
     read -rp "3. 伪装域名 (默认 assets.adobe.com): " d; DOMAIN=${d:-assets.adobe.com}
     
-    echo "4. 加密方式 (推荐 SS-2022)"
-    echo "   1. 2022-blake3-aes-256-gcm (默认)"; echo "   2. 2022-blake3-aes-128-gcm"; echo "   3. 2022-blake3-chacha20-poly1305"
+    echo "4. 加密方式 (推荐默认)"
+    echo "   1. 2022-blake3-aes-128-gcm (默认)"; echo "   2. 2022-blake3-aes-256-gcm"; echo "   3. 2022-blake3-chacha20-poly1305"
     read -rp "   选择 [1-3]: " m; m=${m:-1}
     case $m in
-        2) METHOD="2022-blake3-aes-128-gcm"; KEY=16 ;;
+        2) METHOD="2022-blake3-aes-256-gcm"; KEY=32 ;;
         3) METHOD="2022-blake3-chacha20-poly1305"; KEY=32 ;;
-        *) METHOD="2022-blake3-aes-256-gcm"; KEY=32 ;;
+        *) METHOD="2022-blake3-aes-128-gcm"; KEY=16 ;;
     esac
     PASSWORD=$(openssl rand -base64 $KEY)
     
