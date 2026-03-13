@@ -192,7 +192,7 @@ install_all() {
         [[ "$p" == "$STLS_PORT" ]] && echo -e "${ERROR} 冲突" || { SS_PORT=$p; break; }
     done
     
-    read -rp "3. 伪装域名 (默认 www.cisco.com): " d; DOMAIN=${d:-www.cisco.com}
+    read -rp "3. 伪装域名 (默认 assets.adobe.com): " d; DOMAIN=${d:-assets.adobe.com}
     
     echo "4. 加密方式 (推荐 SS-2022)"
     echo "   1. 2022-blake3-aes-256-gcm (默认)"; echo "   2. 2022-blake3-aes-128-gcm"; echo "   3. 2022-blake3-chacha20-poly1305"
